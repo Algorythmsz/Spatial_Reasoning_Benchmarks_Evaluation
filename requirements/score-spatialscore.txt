@@ -1,0 +1,22 @@
+# spatialscore scoring env — evaluate.py runs the vendored
+# benchmarks/scorers/spatialscore/{evaluate_results.py, utils/util.py}.
+# Rebuilt FROM SCRATCH (see README). Pinned to the working simon_sscore (Python 3.10, CUDA 12.8).
+#   conda create -n <name> python=3.10 -y && conda activate <name>
+#   pip install -r requirements/score-spatialscore.txt
+#
+# The --extra-index-url pulls the cu128 torch/torchvision builds; vllm 0.11.0 is
+# compatible with torch 2.8.0. The judge LLM (default openai/gpt-oss-20b) is resolved
+# from the HF cache at run time (SS_LLM_PATH to override) — not a pip dependency, but it
+# needs openai-harmony (its chat format) below.
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+vllm==0.11.0            # judge engine (evaluate_results.py imports it); pulls transformers/triton/xformers
+torch==2.8.0            # +cu128 via the index above
+torchvision==0.23.0     # util.py imports it (+cu128)
+matplotlib==3.10.9      # util.py imports it
+numpy==2.2.6
+pillow==12.2.0
+tqdm==4.68.3
+PyYAML==6.0.3
+openai-harmony==0.0.8   # gpt-oss-20b harmony chat format (Stage-2 judge)

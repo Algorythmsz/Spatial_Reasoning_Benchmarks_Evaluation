@@ -1,0 +1,12 @@
+# Local SLURM launch scripts + job files (personal, machine-specific — not committed)
+slurm/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Benchmark data + run outputs (default into the repo unless POST_CRISP_ROOT etc. redirect them)
+cache/
+preds/
+results/
+benchmarks/data/

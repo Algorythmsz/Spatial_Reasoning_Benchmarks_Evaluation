@@ -1,0 +1,15 @@
+# Inference env — data_preparation.py + test.py (swift infer).
+# Rebuilt FROM SCRATCH (see README "Rebuild the inference env"). Install these
+# top-level packages into a fresh Python 3.11 env; torch / transformers / tokenizers
+# are resolved (and pinned) by ms-swift + vllm together, so we don't pin torch here
+# (pinning it fights vllm's own torch requirement).
+#
+# After the env works, lock exact versions:
+#   pip freeze > requirements/infer.lock.txt
+
+ms-swift
+vllm                 # models.yaml uses backend: vllm  (test.py -> swift infer --infer_backend vllm)
+qwen-vl-utils        # Qwen-VL image/video preprocessing
+datasets
+huggingface-hub
+PyYAML

@@ -1,0 +1,6 @@
+# multihopspatial scoring env — evaluate.py (rule-based: choice + bbox IoU).
+# Scorer not implemented yet; deps are minimal. Can share the inference env.
+#   pip install -r requirements/score-multihopspatial.txt
+
+numpy>=1.24
+PyYAML>=6

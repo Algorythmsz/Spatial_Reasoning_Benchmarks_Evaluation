@@ -1,0 +1,125 @@
+# models.yaml — inference model registry (consumed by test.py -> swift infer)
+# ─────────────────────────────────────────────────────────────────────────
+# One entry per model. Schema mirrors benchmarks/base.py::Model.from_dict:
+#   tag              unique alias, used in preds/results folder names
+#   path             HF repo id (resolved from cache) OR absolute local path
+#   backend          "vllm" | "pt"                       (default: vllm)
+#   enable_thinking  hybrid-thinking toggle              (omit -> model default)
+#   min_pixels       Qwen-VL smart_resize lower bound    (image tokens)
+#   max_pixels       Qwen-VL smart_resize upper bound
+#   vllm_max_model_len  vLLM context cap (--vllm_max_model_len); omit -> model config
+#                    default (Qwen3-VL = 262144), which sizes the KV cache to 262144
+#                    and OOMs. 86016 covers spatialscore's true max seq (~80k: 32-image
+#                    samples @ 2560 tok/img + prompt + 512 out) losslessly.
+#   vllm_tensor_parallel_size  TP degree; OMIT to let test.py auto-set it to the number
+#                    of GPUs SLURM allocated (CUDA_VISIBLE_DEVICES). A 2-GPU job MUST use
+#                    TP=2 or the model loads on one card and the KV cache starves (32B
+#                    OOMs at 86016 on 1 card, fits comfortably split across 2).
+#
+# ★ REQUIRED ENV for repo-id resolution (test.py MUST export these before infer):
+#     USE_HF=1                         # ms-swift defaults to ModelScope otherwise
+#     HF_HOME=/data2/seungwon/hf       # else repo ids re-download to ~/.cache (!)
+#   Without both, a repo-id `path` below re-downloads (e.g. 27B) instead of hitting
+#   the existing /data2/seungwon/hf/hub cache. Local-path entries (SFT) are immune.
+#
+# ★ min/max_pixels are the SpatialScore test_qwen.py protocol values
+#   (AutoProcessor(min_pixels=256*28*28, max_pixels=2560*28*28)):
+#     256*28*28  = 200704
+#     2560*28*28 = 2007040
+#   These MUST match the original eval or image-token counts diverge and the
+#   scores are no longer comparable. Kept per-model (not in the adapter) because
+#   the input jsonl is model-agnostic — test.py injects them as swift flags.
+
+models:
+  # ── Qwen3-VL-Instruct (base, HF hub) ──────────────────────────────────────
+  - tag: qwen3vl-2b
+    path: Qwen/Qwen3-VL-2B-Instruct
+    backend: vllm
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  - tag: qwen3vl-4b
+    path: Qwen/Qwen3-VL-4B-Instruct
+    backend: vllm
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  - tag: qwen3vl-8b
+    path: Qwen/Qwen3-VL-8B-Instruct
+    backend: vllm
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  - tag: qwen3vl-32b
+    path: Qwen/Qwen3-VL-32B-Instruct
+    backend: vllm
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  # ── Qwen3.5 (natively multimodal; Qwen2VLImageProcessorFast) ──────────────
+  # enable_thinking: false — SpatialScore prompts want a direct, parseable answer
+  # (letter / yes-no / scalar); thinking traces would break the output contract and
+  # diverge from the original (Qwen2.5-VL, no thinking) eval.
+  - tag: qwen3.5-2b
+    path: Qwen/Qwen3.5-2B
+    backend: vllm
+    enable_thinking: false
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  - tag: qwen3.5-4b
+    path: Qwen/Qwen3.5-4B
+    backend: vllm
+    enable_thinking: false
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  - tag: qwen3.5-9b
+    path: Qwen/Qwen3.5-9B
+    backend: vllm
+    enable_thinking: false
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  - tag: qwen3.5-27b
+    path: Qwen/Qwen3.5-27B
+    backend: vllm
+    enable_thinking: false
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  # ── SpatialCorpus SFT checkpoints ─────────────────────────────────────────
+  # These live as SUBFOLDERS of the model repo haoningwu/SpatialScore (NOT the
+  # dataset repo of the same name). test.py resolves repo_id + subfolder to a local
+  # checkpoint dir before inference (swift/vllm need a concrete model dir).
+  - tag: qwen3vl-4b-sft-spatialcorpus
+    path: haoningwu/SpatialScore
+    subfolder: Qwen3-VL-4B_SpatialCorpus
+    backend: vllm
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  - tag: qwen3vl-8b-sft-spatialcorpus
+    path: haoningwu/SpatialScore
+    subfolder: Qwen3-VL-8B_SpatialCorpus
+    backend: vllm
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  # ── MultiHopSpatial finetune (etri-vilab, HF hub) ─────────────────────────
+  - tag: mhs-qwen3vl-4b
+    path: etri-vilab/MultiHopSpatial-Qwen3-VL-4B-Instruct
+    backend: vllm
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
