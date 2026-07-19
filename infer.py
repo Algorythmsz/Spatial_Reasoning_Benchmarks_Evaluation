@@ -18,10 +18,11 @@ model-agnostic): min/max_pixels (SpatialScore test_qwen protocol) via MIN_PIXELS
 env + max_pixels arg, enable_thinking, backend via infer_backend.
 `remove_unused_columns=False` keeps our id/meta columns in the preds (reshape needs them).
 
-⚠️ In-process means no per-model GPU isolation: running several models in one invocation
-loads each into the same process. We do best-effort teardown (gc + empty_cache + vllm
-parallel-state destroy) between models, but vllm doesn't always fully release. If a
-multi-model run OOMs, run one model per invocation (each process starts/exits clean).
+Multiple models can run in one invocation (`--models a,b,c`): they load into the same
+process one after another, and `_release_gpu()` frees the GPU between them (gc + vllm
+parallel-state destroy + empty_cache). That teardown is best-effort — vllm doesn't always
+fully release (CUDA context / graphs) — so if a multi-model run OOMs, fall back to one
+`infer.py` invocation per model (a fresh process is the only guaranteed reclaim).
 
 HF cache: repo ids need `USE_HF=1` (else ms-swift hits ModelScope) and, if your cache
 isn't in the default location, `HF_HOME` (see README). infer.py sets USE_HF if unset.
@@ -78,11 +79,12 @@ def resolve_model_path(model: base.Model) -> str:
 def _release_gpu() -> None:
     """Free GPU memory after an infer_main() call so the next model can load.
 
-    In-process runs don't get the clean slate a per-model subprocess did. This is
-    best-effort: it drops references, collects, empties the torch cache, and tears down
-    vllm's parallel state. vllm may still not release everything (CUDA context / graph
-    memory); if a multi-model run OOMs, run one model per invocation. All imports are
-    lazy + guarded so this is a no-op when torch/vllm aren't the active stack.
+    Running several models in one process means there's no per-model subprocess whose
+    exit reclaims the GPU, so we do it by hand: drop refs, collect, tear down vllm's
+    parallel state, and empty the torch cache. Best-effort — vllm can still retain some
+    memory (CUDA context / graphs); if a multi-model run OOMs anyway, split it into one
+    `infer.py` invocation per model. Imports are lazy + guarded so this is a no-op when
+    torch/vllm aren't the active stack.
     """
     import gc
 
@@ -150,7 +152,7 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
     if model.vllm_max_model_len is not None:                 # cap KV cache: model config default (e.g. 262144) OOMs
         kwargs["vllm_max_model_len"] = model.vllm_max_model_len
     tp = model.vllm_tensor_parallel_size
-    if tp is None:                                           # else split across every GPU SLURM gave us
+    if tp is None:                                           # else split across every visible GPU (CUDA_VISIBLE_DEVICES)
         tp = len([d for d in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if d.strip()])
     if tp and tp > 1:
         kwargs["vllm_tensor_parallel_size"] = tp
@@ -168,7 +170,7 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = prev
-        _release_gpu()
+        _release_gpu()                                       # reclaim GPU before the next model loads
 
     n = _count_lines(val)                                     # expected sample count = input rows
     got = _count_lines(preds) if preds.exists() else 0

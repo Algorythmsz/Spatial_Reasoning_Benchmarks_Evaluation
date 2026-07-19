@@ -81,7 +81,7 @@ pip freeze > requirements/score.lock.txt
 
 ```bash
 export USE_HF=1                
-export HF_HOME=<where-you-want-to-download>  # where to download the model
+export HF_HOME=<where-to-download-the-model>  # where to download the model
 ```
 
 Put these in your shell profile (`~/.bashrc`) or the env's activation hook
@@ -94,8 +94,8 @@ By default benchmark data and outputs land **inside the repo** (home disk). Spat
 alone is ~15.8 GB — if home is tight, point these at a big disk:
 
 ```bash
-export BENCH_DATA_DIR=<where-you-want-to-download>/post_crisp/data   # raw + preprocessed benchmark data
-export POST_CRISP_ROOT=<where-you-want-to-store-the-results>/post_crisp       # cache / preds / results
+export BENCH_DATA_DIR=<where-to-download-the-data>/post_crisp/data   # raw + preprocessed benchmark data
+export POST_CRISP_ROOT=<where-to-store-the-results>/post_crisp       # cache / preds / results
 ```
 
 `BENCH_DATA_DIR` is separate from `POST_CRISP_ROOT` — set **both**, or benchmark data
@@ -130,6 +130,11 @@ python infer.py --benchmarks spatialscore --models qwen3vl-4b,qwen3.5-4b
 ```
 
 Options: `--all` (every benchmark), `--max-new-tokens N` (default 512).
+
+Multiple models in one call load sequentially, and inference frees the GPU between them
+(best-effort teardown). If a multi-model run OOMs — vllm doesn't always fully release
+in-process — split it into one `infer.py` run per model (a fresh process is the only
+guaranteed reclaim).
 
 ---
 
@@ -180,7 +185,7 @@ A `--csv` given as a **bare filename** is written under `POST_CRISP_ROOT/table/`
 
 ---
 
-## Full example (qwen3vl-4b + qwen3.5-4b on spatialscore)
+## Full example from scratch (qwen3vl-4b + qwen3.5-4b on spatialscore)
 
 ```bash
 # 0a) build the two conda envs (once, ever — see Step 0a for details/notes)
@@ -194,17 +199,15 @@ pip install -r requirements/score.txt            # single scoring env (all bench
 
 # 0b/0c) env vars (set once per session; put in ~/.bashrc to skip retyping)
 export USE_HF=1                                   # use HuggingFace, not ModelScope
-export HF_HOME=<your HF cache>                    # where models download/cache; omit for ~/.cache/huggingface
-export BENCH_DATA_DIR=<big-disk>/post_crisp/data  # where benchmark data downloads; omit to keep in-repo
-export POST_CRISP_ROOT=<big-disk>/post_crisp      # where preds/results/table land; omit to keep in-repo
-# (HF_HOME / BENCH_DATA_DIR / POST_CRISP_ROOT are only needed if the home disk is tight;
-#  with room to spare, `export USE_HF=1` alone is enough — the rest fall back to defaults.)
+export HF_HOME=<where-to-download-the-model>                    # where models download/cache; omit for ~/.cache/huggingface
+export BENCH_DATA_DIR=<where-to-download-the-data>/post_crisp/data  # where benchmark data downloads; omit to keep in-repo
+export POST_CRISP_ROOT=<where-to-store-the-results>/post_crisp      # where preds/results/table land; omit to keep in-repo
 
 # 1) prepare
 conda activate infer-env
 python data_preparation.py spatialscore
 
-# 2) infer
+# 2) infer  (multiple models OK; GPU is freed between them — split if a run OOMs)
 python infer.py --benchmarks spatialscore --models qwen3vl-4b,qwen3.5-4b
 
 # 3) score  (single scoring env — has vllm + torch/torchvision/matplotlib for every bench)
@@ -216,30 +219,6 @@ cat results/qwen3.5-4b/spatialscore/summary_report.json
 #    (same session as above → env vars still apply; new shell → re-export step 0 first)
 python make_table.py
 ```
-
-### One-shot (single machine, no SLURM)
-
-`run_spatialscore.sh` chains all four steps for spatialscore — it activates the
-inference env for prepare+infer, switches to the scoring env for evaluate, then
-writes the leaderboard to `table/spatialscore.csv`:
-
-```bash
-./run_spatialscore.sh qwen3vl-4b,qwen3.5-4b
-```
-
-Defaults match a specific box; override from the environment for yours:
-
-```bash
-INFER_ENV=<inference-env> SCORE_ENV=<scoring-env> \
-POST_CRISP_ROOT=<big-disk>/post_crisp HF_HOME=<your HF cache> \
-./run_spatialscore.sh qwen3vl-4b
-```
-
-`INFER_ENV`/`SCORE_ENV` name the two conda envs; storage vars (Step 0) fall back to
-those defaults only if not already exported. On a cluster, prefer the SLURM scripts
-(inference+scoring); run `make_table.py` afterwards.
-
----
 
 ## Where things land
 
