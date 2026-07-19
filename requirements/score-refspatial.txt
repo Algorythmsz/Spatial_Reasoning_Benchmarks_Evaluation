@@ -1,7 +1,0 @@
-# refspatial_expand scoring env — evaluate.py (points-in-mask geometry).
-# Scorer not implemented yet; deps are minimal.
-#   pip install -r requirements/score-refspatial.txt
-
-pillow>=10
-numpy>=1.24
-PyYAML>=6

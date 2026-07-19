@@ -14,7 +14,7 @@ Contains:
   - BenchmarkAdapter  : the 4 methods each bench implements + shared preprocess
                         (fingerprint-based auto-invalidation)
                         The input jsonl is model-agnostic. Per-model settings live
-                        in test.py + models.yaml + swift flags.
+                        in infer.py + models.yaml + swift flags.
 """
 
 from __future__ import annotations
@@ -86,17 +86,18 @@ class Model:
     tag: str                                  # unique alias (used in paths/result folders), e.g. "qwen3.5-27b"
     path: str                                 # HF repo id or local ckpt path (absolute, runtime)
     subfolder: str | None = None              # subfolder within `path` (HF repo with multiple ckpts), e.g. SFT dirs
+    model_type: str | None = None             # force ms-swift model_type (e.g. "qwen3_vl") when auto-match is ambiguous
     backend: str = "vllm"                     # "vllm" | "pt"
     enable_thinking: bool | None = None       # Qwen3.5 etc. hybrid-thinking -> False to disable
     max_pixels: int | None = None             # to align with the test_qwen protocol (else adapter default)
     min_pixels: int | None = None
     vllm_max_model_len: int | None = None     # vLLM context cap (--vllm_max_model_len); omit -> model config default
-    vllm_tensor_parallel_size: int | None = None   # TP degree; omit -> test.py auto = #CUDA_VISIBLE_DEVICES
+    vllm_tensor_parallel_size: int | None = None   # TP degree; omit -> infer.py auto = #CUDA_VISIBLE_DEVICES
     extra: dict[str, Any] = field(default_factory=dict)   # pass-through for extra options
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Model":
-        known = {"tag", "path", "subfolder", "backend", "enable_thinking",
+        known = {"tag", "path", "subfolder", "model_type", "backend", "enable_thinking",
                  "max_pixels", "min_pixels", "vllm_max_model_len", "vllm_tensor_parallel_size"}
         return cls(
             **{k: d[k] for k in known if k in d},
@@ -167,7 +168,7 @@ class BenchmarkAdapter(ABC):
           - carry scoring meta (id / gt / sub_task) as extra keys (--remove_unused_columns false)
           - return None to drop this sample (preprocess filters it out; e.g. skip video)
         NOTE: per-model settings like enable_thinking / max_pixels do NOT go here.
-          test.py handles them at inference time via models.yaml -> swift infer flags
+          infer.py handles them at inference time via models.yaml -> swift infer flags
           (the input jsonl is model-agnostic).
         """
 
@@ -204,7 +205,7 @@ class BenchmarkAdapter(ABC):
         Store the fingerprint (md5) of the processed recs in a sidecar (.<name>.jsonl.sha).
         If data/prompts change, the fingerprint changes and it auto-regenerates ->
         no manual cache clearing / --force needed.
-        No per-model settings here (the input jsonl is model-agnostic); test.py handles
+        No per-model settings here (the input jsonl is model-agnostic); infer.py handles
         those via swift flags at inference time.
         """
         raw = self.load_raw()
@@ -230,7 +231,7 @@ class BenchmarkAdapter(ABC):
         print(f"[preprocess ok ] {out}  ({len(recs)} samples{skip_note}, fp={fp[:12]})")
         return out
 
-    # ── Path/completion contract (test.py <-> evaluate.py communicate only via these files) ──
+    # ── Path/completion contract (infer.py <-> evaluate.py communicate only via these files) ──
     def preds_path(self, model: Model) -> Path:
         return PREDS_DIR / model.tag / f"{self.name}.jsonl"
 
@@ -241,7 +242,7 @@ class BenchmarkAdapter(ABC):
         return RESULTS_DIR / model.tag / self.name
 
     def mark_done(self, model: Model, n: int) -> None:
-        """Called by test.py when inference finishes cleanly -> mark done (+ record expected sample count)."""
+        """Called by infer.py when inference finishes cleanly -> mark done (+ record expected sample count)."""
         p = self.done_flag(model)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({"n": n, "ts": time.time()}), encoding="utf-8")

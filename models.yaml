@@ -1,8 +1,10 @@
-# models.yaml — inference model registry (consumed by test.py -> swift infer)
+# models.yaml — inference model registry (consumed by infer.py -> swift infer)
 # ─────────────────────────────────────────────────────────────────────────
 # One entry per model. Schema mirrors benchmarks/base.py::Model.from_dict:
 #   tag              unique alias, used in preds/results folder names
 #   path             HF repo id (resolved from cache) OR absolute local path
+#   model_type       force ms-swift --model_type (e.g. qwen3_vl); needed for FT ckpts
+#                    whose config matches qwen3_vl / _emb / _reranker (auto-match fails)
 #   backend          "vllm" | "pt"                       (default: vllm)
 #   enable_thinking  hybrid-thinking toggle              (omit -> model default)
 #   min_pixels       Qwen-VL smart_resize lower bound    (image tokens)
@@ -11,12 +13,12 @@
 #                    default (Qwen3-VL = 262144), which sizes the KV cache to 262144
 #                    and OOMs. 86016 covers spatialscore's true max seq (~80k: 32-image
 #                    samples @ 2560 tok/img + prompt + 512 out) losslessly.
-#   vllm_tensor_parallel_size  TP degree; OMIT to let test.py auto-set it to the number
+#   vllm_tensor_parallel_size  TP degree; OMIT to let infer.py auto-set it to the number
 #                    of GPUs SLURM allocated (CUDA_VISIBLE_DEVICES). A 2-GPU job MUST use
 #                    TP=2 or the model loads on one card and the KV cache starves (32B
 #                    OOMs at 86016 on 1 card, fits comfortably split across 2).
 #
-# ★ REQUIRED ENV for repo-id resolution (test.py MUST export these before infer):
+# ★ REQUIRED ENV for repo-id resolution (infer.py MUST export these before infer):
 #     USE_HF=1                         # ms-swift defaults to ModelScope otherwise
 #     HF_HOME=/data2/seungwon/hf       # else repo ids re-download to ~/.cache (!)
 #   Without both, a repo-id `path` below re-downloads (e.g. 27B) instead of hitting
@@ -28,7 +30,7 @@
 #     2560*28*28 = 2007040
 #   These MUST match the original eval or image-token counts diverge and the
 #   scores are no longer comparable. Kept per-model (not in the adapter) because
-#   the input jsonl is model-agnostic — test.py injects them as swift flags.
+#   the input jsonl is model-agnostic — infer.py injects them as swift flags.
 
 models:
   # ── Qwen3-VL-Instruct (base, HF hub) ──────────────────────────────────────
@@ -98,11 +100,12 @@ models:
 
   # ── SpatialCorpus SFT checkpoints ─────────────────────────────────────────
   # These live as SUBFOLDERS of the model repo haoningwu/SpatialScore (NOT the
-  # dataset repo of the same name). test.py resolves repo_id + subfolder to a local
+  # dataset repo of the same name). infer.py resolves repo_id + subfolder to a local
   # checkpoint dir before inference (swift/vllm need a concrete model dir).
   - tag: qwen3vl-4b-sft-spatialcorpus
     path: haoningwu/SpatialScore
     subfolder: Qwen3-VL-4B_SpatialCorpus
+    model_type: qwen3_vl          # ckpt config matches qwen3_vl / _emb / _reranker -> disambiguate
     backend: vllm
     min_pixels: 200704
     max_pixels: 2007040
@@ -111,6 +114,7 @@ models:
   - tag: qwen3vl-8b-sft-spatialcorpus
     path: haoningwu/SpatialScore
     subfolder: Qwen3-VL-8B_SpatialCorpus
+    model_type: qwen3_vl          # ckpt config matches qwen3_vl / _emb / _reranker -> disambiguate
     backend: vllm
     min_pixels: 200704
     max_pixels: 2007040
@@ -119,6 +123,7 @@ models:
   # ── MultiHopSpatial finetune (etri-vilab, HF hub) ─────────────────────────
   - tag: mhs-qwen3vl-4b
     path: etri-vilab/MultiHopSpatial-Qwen3-VL-4B-Instruct
+    model_type: qwen3_vl          # ckpt config matches qwen3_vl / _emb / _reranker -> disambiguate
     backend: vllm
     min_pixels: 200704
     max_pixels: 2007040

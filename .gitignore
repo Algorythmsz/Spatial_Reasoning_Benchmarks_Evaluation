@@ -9,4 +9,5 @@ __pycache__/
 cache/
 preds/
 results/
+table/
 benchmarks/data/
