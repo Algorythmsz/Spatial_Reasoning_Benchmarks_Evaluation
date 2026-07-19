@@ -9,9 +9,8 @@ Runs in the inference env, driving the INFERENCE half of the pipeline. For each
                               the preds jsonl to preds_path(model)
   4) adapter.mark_done()    — write done.flag with the expected sample count
 
-Inference calls ms-swift as a LIBRARY: `swift.pipelines.infer_main(InferArguments(...))`
-— exactly the code path the `swift infer` CLI runs, so the preds jsonl schema is
-identical (reshape/scoring unchanged). No `swift` binary / subprocess is spawned.
+Inference calls ms-swift as a LIBRARY: `swift.pipelines.infer_main(InferArguments(...))`,
+in-process — no subprocess is spawned.
 
 Per-model settings from models.yaml are injected here (NOT in the adapter, which stays
 model-agnostic): min/max_pixels (SpatialScore test_qwen protocol) via MIN_PIXELS/MAX_PIXELS
@@ -122,19 +121,17 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
     # environment by the template at inference time — no InferArguments field for min, so
     # env is the channel for both. We're in-process, so mutate os.environ (restored in the
     # finally below) instead of handing a copied env to a child.
-    os.environ.setdefault("USE_HF", "1")                 
+    os.environ.setdefault("USE_HF", "1")                     # HF hub/cache, not ModelScope
     saved_env = {k: os.environ.get(k) for k in ("MIN_PIXELS", "MAX_PIXELS")}
     if model.min_pixels is not None:
         os.environ["MIN_PIXELS"] = str(model.min_pixels)
     if model.max_pixels is not None:
         os.environ["MAX_PIXELS"] = str(model.max_pixels)     # also passed as max_pixels arg below (same value)
 
-    # Build InferArguments == the flags the `swift infer` CLI would have parsed. Field
-    # names match the CLI flags 1:1, so the run (and preds schema) is identical.
     kwargs = dict(
         model=model_path,
         infer_backend=model.backend,                         # vllm | pt
-        val_dataset=[str(val)],                              # list form, like the CLI
+        val_dataset=[str(val)],
         result_path=str(preds),
         remove_unused_columns=False,                         # ★ keep id/meta columns for reshape/scoring
         max_new_tokens=max_new_tokens,
@@ -146,7 +143,7 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
     if model.model_type is not None:                         # FT ckpts (etri/sft) match multiple swift types -> force it
         kwargs["model_type"] = model.model_type
     if model.max_pixels is not None:
-        kwargs["max_pixels"] = model.max_pixels              # CLI upper bound (env covers the lower bound)
+        kwargs["max_pixels"] = model.max_pixels              # upper bound (env covers the lower bound)
     if model.enable_thinking is not None:                    # e.g. Qwen3.5 -> False for a direct, parseable answer
         kwargs["enable_thinking"] = model.enable_thinking
     if model.vllm_max_model_len is not None:                 # cap KV cache: model config default (e.g. 262144) OOMs
@@ -157,7 +154,6 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
     if tp and tp > 1:
         kwargs["vllm_tensor_parallel_size"] = tp
 
-    # Lazy import: swift + vllm are heavy, and only the inference env has them.
     from swift.arguments import InferArguments
     from swift.pipelines import infer_main
 
