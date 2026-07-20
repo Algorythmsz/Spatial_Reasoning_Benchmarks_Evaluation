@@ -1,13 +1,25 @@
 """benchmarks/refspatial_expand.py — RefSpatial-Expand-Bench adapter.
 
 HF: JingkunAn/RefSpatial-Expand-Bench (dataset)
-    Location/question.json + Location/image/*.jpg + Location/mask/*.png
-    Placement/question.json + Placement/image/*.jpg + Placement/mask/*.png
-    (data/*.parquet are duplicates for HF datasets loading — here we use json+images only)
+    Location/{question.json, image/*.jpg, mask/*.png}
+    Placement/{question.json, image/*.jpg, mask/*.png}
+    (data/*.parquet is the same content packed for HF `datasets`; we read the
+     json + image/ + mask/ trees directly and ignore the parquet.)
 
-Each question: object/prompt/suffix + rgb_path/mask_path. The model outputs a list of
-points, scored (geo) by whether they fall inside the ground-truth mask (needs PIL+numpy; see README).
-         (reshape/score are implemented in the evaluate stage; here only prepare/preprocess.)
+Task: given an RGB image and a referring prompt (object + spatial instruction), the
+model must POINT to the target location(s). The dataset suffix asks for normalized
+0-1 tuples, e.g. "[(0.25, 0.40)]".
+
+Scoring (RoboRefer point-in-mask metric; needs PIL + numpy):
+  - Parse predicted points out of the free-text answer (_text2pts).
+  - Per-sample accuracy = fraction of predicted points that land inside the GT mask
+    (out-of-bounds points count as misses; empty prediction -> 0.0).
+  - Aggregated overall and by subset (Location/Placement) / step / category.
+Env knob: RS_ABSOLUTE=1 treats every coord as absolute pixels rather than normalized
+(for models that emit pixels regardless of the prompt).
+
+This adapter implements the whole pipeline: ensure_data (HF download), load_raw,
+to_messages (preprocess), reshape (preds jsonl -> scorer schema), and score.
 """
 
 from __future__ import annotations
@@ -177,6 +189,8 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
                 a["accuracy"] = None
                 continue
 
+            # GT mask -> binary {0,1}: drop the alpha/extra channels (use channel 0)
+            # and treat any non-zero pixel as "inside the target region".
             mask = np.array(Image.open(mask_path)) / 255.0
             if mask.ndim == 3:
                 mask = mask[:, :, 0]
@@ -184,6 +198,10 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
 
             pts = self._text2pts(a.get("text", ""), mask.shape[1], mask.shape[0], is_absolute)
 
+            # acc = (# predicted points inside the mask) / (# predicted points).
+            # In-bounds points score mask[y, x] (1 inside, 0 outside); out-of-bounds
+            # points are appended as explicit zeros so they count as misses in the mean.
+            # No predicted points -> acc stays 0.0.
             acc = 0.0
             if len(pts) > 0:
                 pts = pts.astype(int)
@@ -191,7 +209,7 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
                     (pts[:, 0] >= 0) & (pts[:, 0] < mask.shape[1])
                     & (pts[:, 1] >= 0) & (pts[:, 1] < mask.shape[0])
                 )
-                hits = mask[pts[in_range, 1], pts[in_range, 0]]           # 1 if inside mask
+                hits = mask[pts[in_range, 1], pts[in_range, 0]]           # 1 if inside mask, 0 if outside
                 acc = float(np.concatenate([hits, np.zeros(len(pts) - int(in_range.sum()))]).mean())
 
             a["accuracy"] = acc
@@ -203,6 +221,7 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
         def _agg(d: dict[str, list[float]]) -> dict[str, dict[str, float]]:
             return {k: {"n": len(v), "acc": float(np.mean(v)) if v else 0.0} for k, v in sorted(d.items())}
 
+        # rich provenance report -> summary_report.json (keeps native by_* keys, n/acc, flags)
         summary = {
             "overall": {"n": len(all_acc), "acc": float(np.mean(all_acc)) if all_acc else 0.0},
             "by_subset": _agg(per_subset),
@@ -211,12 +230,22 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
             "is_absolute": is_absolute,
             "missing_mask": missing,
         }
-
-        # persist per-question accuracy + the summary next to all_results.json
-        with open(results_path, "w", encoding="utf-8") as f:
+        with open(results_path, "w", encoding="utf-8") as f:   # per-question accuracy back into all_results.json
             json.dump(answers, f, ensure_ascii=False, indent=2)
         with open(in_dir / "summary_report.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
         print(f"[refspatial_expand score] overall acc={summary['overall']['acc']:.4f} "
               f"(n={summary['overall']['n']}, missing_mask={missing}, is_absolute={is_absolute})")
-        return summary
+
+        # metrics.json -> make_table / evaluate.py print_summary shape ({accuracy, count}).
+        # subset (Location/Placement) -> sub_task, step -> task, so all are addressable via
+        # make_table --breakdown.
+        def _cells(d: dict[str, list[float]]) -> dict[str, dict[str, float]]:
+            return {k: {"accuracy": float(np.mean(v)) if v else 0.0, "count": len(v)}
+                    for k, v in sorted(d.items())}
+        return {
+            "overall": {"accuracy": float(np.mean(all_acc)) if all_acc else 0.0, "count": len(all_acc)},
+            "category": _cells(per_category),
+            "sub_task": _cells(per_subset),
+            "task": _cells(per_step),
+        }

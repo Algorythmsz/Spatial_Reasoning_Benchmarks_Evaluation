@@ -14,3 +14,6 @@ benchmarks/data/
 
 # Parallel-infer logs (run_infer_parallel.sh)
 logs/
+
+# Personal one-off run scripts (machine-specific — not committed)
+run_2b_ref_multihop.sh

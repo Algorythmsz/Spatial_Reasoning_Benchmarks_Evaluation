@@ -10,8 +10,8 @@ in three separate steps:
 | 3. score | `evaluate.py` | inference env (scoring env for SpatialScore) | predictions → run the scorer → `metrics.json` |
 - 2 environments are needed: the inference env, plus a scoring env for SpatialScore's LLM judge.
 - **Benchmarks:** `spatialscore`, `multihopspatial`, `refspatial_expand` (in `benchmarks/`).
-  *(`spatialscore` and `refspatial_expand` are wired end-to-end. `multihopspatial` runs
-  inference but its scorer is not implemented yet — reshape/score raise NotImplementedError.)*
+  *(all three are wired end-to-end. `multihopspatial` scoring is rule-based — MCQ accuracy +
+  bbox IoU, pure stdlib — so it scores in the inference env like `refspatial_expand`.)*
 - **Models:** listed in `models.yaml` — edit that file to add/remove models.
 
 ---
