@@ -45,6 +45,28 @@ def load_models(tags: list[str] | None = None) -> list[base.Model]:
     return models
 
 
+# ── pretty-print one model's metrics to the terminal ─────────────────────────
+def print_summary(bench: str, tag: str, metrics: dict) -> None:
+    """Show the just-scored model's accuracy (overall + per-category) in the terminal.
+    make_table.py still gives the cross-model leaderboard; this is a per-run readout."""
+    def acc(cell: dict) -> str:                              # {accuracy(0..1), count} -> "45.67% (n=1234)"
+        return f"{cell.get('accuracy', 0.0) * 100:5.2f}%  (n={cell.get('count', 0)})"
+
+    title = f"  {bench} / {tag}  "
+    print("\n" + title.center(48, "="))
+    overall = metrics.get("overall")
+    if isinstance(overall, dict):
+        print(f"  overall     {acc(overall)}")
+    for group in ("category", "task", "sub_task"):           # every breakdown the scorer emits
+        cells = metrics.get(group) or {}
+        if isinstance(cells, dict) and cells:
+            print(f"  by {group}:")
+            for name, cell in sorted(cells.items()):
+                if isinstance(cell, dict):
+                    print(f"    {name:<24}{acc(cell)}")
+    print("=" * 48)
+
+
 # ── reshape + score for one (adapter, model), in the current env ─────────────
 def score_one(adapter: base.BenchmarkAdapter, model: base.Model) -> dict:
     preds = adapter.preds_path(model)                        # swift infer output for this (model, bench)
@@ -57,6 +79,7 @@ def score_one(adapter: base.BenchmarkAdapter, model: base.Model) -> dict:
     (results / "metrics.json").write_text(                   # persist the metrics next to the artifacts
         json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[evaluate] {adapter.name}/{model.tag} metrics -> {results / 'metrics.json'}")
+    print_summary(adapter.name, model.tag, metrics)          # per-run readout in the terminal
     return metrics
 
 
