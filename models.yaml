@@ -18,12 +18,6 @@
 #                    TP=2 or the model loads on one card and the KV cache starves (32B
 #                    OOMs at 86016 on 1 card, fits comfortably split across 2).
 #
-# ★ REQUIRED ENV for repo-id resolution (infer.py MUST export these before infer):
-#     USE_HF=1                         # ms-swift defaults to ModelScope otherwise
-#     HF_HOME=/data2/seungwon/hf       # else repo ids re-download to ~/.cache (!)
-#   Without both, a repo-id `path` below re-downloads (e.g. 27B) instead of hitting
-#   the existing /data2/seungwon/hf/hub cache. Local-path entries (SFT) are immune.
-#
 # ★ min/max_pixels are the SpatialScore test_qwen.py protocol values
 #   (AutoProcessor(min_pixels=256*28*28, max_pixels=2560*28*28)):
 #     256*28*28  = 200704

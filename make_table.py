@@ -7,7 +7,7 @@ the run completed). Models that OOM'd during inference or failed in the judge
 have no metrics.json and are listed as skipped, not silently dropped.
 
 Usage:
-    POST_CRISP_ROOT=/data2/seungwon/post_crisp python make_table.py
+    POST_CRISP_ROOT=/data2/seungwon/post_crisp python make_table.py --bench spatialscore
     python make_table.py --bench spatialscore --breakdown category --csv out.csv
 
 Env: POST_CRISP_ROOT (default ".") / RESULTS_DIR override the results location,
@@ -92,7 +92,7 @@ def print_table(header: list[str], rows: list[list[str]]) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bench", default="spatialscore", help="benchmark name (results/<tag>/<bench>/)")
+    ap.add_argument("--bench", required=True, help="benchmark name (results/<tag>/<bench>/)")
     ap.add_argument("--breakdown", choices=BREAKDOWNS, help="add per-group columns (default: overall only)")
     ap.add_argument("--csv", help="also write the table to this CSV path")
     args = ap.parse_args()

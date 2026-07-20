@@ -29,7 +29,8 @@ isn't in the default location, `HF_HOME` (see README). infer.py sets USE_HF if u
 Usage:
     conda activate <swift env>
     python infer.py --benchmarks spatialscore --models qwen3.5-27b,qwen3vl-8b
-    python infer.py --all --models qwen3.5-27b
+    python infer.py --benchmarks all --models qwen3.5-27b
+    python infer.py --benchmarks all --models all      # every benchmark × every model in models.yaml
 """
 
 from __future__ import annotations
@@ -184,17 +185,17 @@ def _count_lines(p: Path) -> int:
 # ── entry point ──────────────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run inference (ms-swift) over models.yaml.")
-    ap.add_argument("--benchmarks", help="comma-separated bench names")
-    ap.add_argument("--all", action="store_true", help="run every registered bench")
-    ap.add_argument("--models", help="comma-separated model tags from models.yaml")
+    ap.add_argument("--benchmarks", help="comma-separated bench names, or 'all' for every bench")
+    ap.add_argument("--models", help="comma-separated model tags from models.yaml, or 'all' for every model")
     ap.add_argument("--max-new-tokens", type=int, default=512, help="generation budget (default 512)")
     args = ap.parse_args()
 
     names = args.benchmarks.split(",") if args.benchmarks else None
-    adapters = base.resolve(names, args.all)                  # errors if neither --benchmarks nor --all given
+    adapters = base.resolve(names)                            # errors if --benchmarks not given
     if not args.models:
-        raise SystemExit("specify --models (comma-separated tags from models.yaml).")
-    models = load_models(args.models.split(","))
+        raise SystemExit("specify --models (comma-separated tags from models.yaml, or 'all').")
+    tags = None if args.models == "all" else args.models.split(",")  # 'all' -> every model in models.yaml
+    models = load_models(tags)
 
     failures: list[str] = []
     for model in models:

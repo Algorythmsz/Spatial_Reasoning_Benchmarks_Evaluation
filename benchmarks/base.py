@@ -11,10 +11,10 @@ Contains:
   - Model             : one entry from models.yaml (minimal info for inference)
   - register / get_adapter / list_adapters / resolve : name -> adapter instance
   - path/completion contract : cache / preds / results / done.flag / is_complete
-  - BenchmarkAdapter  : the 4 methods each bench implements + shared preprocess
-                        (fingerprint-based auto-invalidation)
-                        The input jsonl is model-agnostic. Per-model settings live
-                        in infer.py + models.yaml + swift flags.
+  - BenchmarkAdapter  : the 4 methods each bench implements, plus a shared preprocess()
+                        with fingerprint-based auto-invalidation. The input jsonl it
+                        builds is model-agnostic; per-model settings (pixels, thinking,
+                        backend) are applied later in infer.py from models.yaml.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 
-# ── Root paths (all gitignored; absolute paths injected only via runtime env) ──
+# ── Root paths (absolute paths injected only via runtime env) ──
 ROOT        = Path(os.environ.get("POST_CRISP_ROOT", ".")).resolve()
 CACHE_DIR   = Path(os.environ.get("CACHE_DIR",   ROOT / "cache"))
 PREDS_DIR   = Path(os.environ.get("PREDS_DIR",   ROOT / "preds"))
@@ -96,7 +96,7 @@ class Model:
     extra: dict[str, Any] = field(default_factory=dict)   # pass-through for extra options
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Model":
+    def from_dict(cls, d: dict[str, Any]) -> "Model": # models.yaml -> Model
         known = {"tag", "path", "subfolder", "model_type", "backend", "enable_thinking",
                  "max_pixels", "min_pixels", "vllm_max_model_len", "vllm_tensor_parallel_size"}
         return cls(
@@ -131,14 +131,11 @@ def list_adapters() -> list[str]:
     return sorted(REGISTRY)
 
 
-def resolve(names: list[str] | None, all_: bool = False) -> list["BenchmarkAdapter"]:
-    """Runner selector. --benchmarks a,b  or  --all. (guards against running everything by mistake: error if neither)"""
-    if all_:
-        chosen = list_adapters()
-    elif names:
-        chosen = names
-    else:
-        raise SystemExit("specify a benchmark (--benchmarks a,b or --all).")
+def resolve(names: list[str] | None) -> list["BenchmarkAdapter"]:
+    """Runner selector. --benchmarks a,b  or  --benchmarks all. (error if none given, to guard against running everything by mistake)"""
+    if not names:
+        raise SystemExit("specify --benchmarks (comma-separated names, or 'all').")
+    chosen = list_adapters() if names == ["all"] else names
     return [get_adapter(n) for n in chosen]
 
 
@@ -161,7 +158,7 @@ class BenchmarkAdapter(ABC):
         """Load raw data as a list of dicts. (called only in env1 -> heavy imports go inside)"""
 
     @abstractmethod
-    def to_messages(self, row: dict[str, Any]) -> dict[str, Any]:
+    def to_messages(self, row: dict[str, Any]) -> dict[str, Any] | None:
         """
         One raw row -> one ms-swift jsonl row. (model-agnostic)
           - build messages(+ <image>) / images(absolute paths) + inject the prompt

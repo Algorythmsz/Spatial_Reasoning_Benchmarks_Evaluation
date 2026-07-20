@@ -2,7 +2,7 @@
 """data_preparation.py — benchmark data download + ms-swift preprocessing orchestrator.
 
 For each bench:
-  1) ensure_data()  — download raw data from HF into benchmarks/data/<name>/ if missing (idempotent).
+  1) ensure_data()  — download raw data from HF into benchmarks/data/<name>/ .
   2) preprocess()   — raw -> ms-swift jsonl (benchmarks/data/<name>/<name>.jsonl).
 
 Usage:
@@ -36,7 +36,7 @@ def main() -> int:
         print(f"\n===== {name} =====")
         adapter = base.get_adapter(name)
         try:
-            adapter.ensure_data()      # download if missing (idempotent)
+            adapter.ensure_data()      # download if missing
             adapter.preprocess()       # build ms-swift jsonl (auto-regenerated when fingerprint changes)
         except Exception as e:
             print(f"[FAIL] {name}: {type(e).__name__}: {e}")

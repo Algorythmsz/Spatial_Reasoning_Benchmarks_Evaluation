@@ -63,16 +63,16 @@ def score_one(adapter: base.BenchmarkAdapter, model: base.Model) -> dict:
 # ── entry point ──────────────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser(description="Score benchmark predictions (activate an env with the scorer deps; see README).")
-    ap.add_argument("--benchmarks", help="comma-separated bench names")
-    ap.add_argument("--all", action="store_true", help="score every registered bench")
-    ap.add_argument("--models", help="comma-separated model tags from models.yaml")
+    ap.add_argument("--benchmarks", help="comma-separated bench names, or 'all' for every bench")
+    ap.add_argument("--models", help="comma-separated model tags from models.yaml, or 'all' for every model")
     args = ap.parse_args()
 
     names = args.benchmarks.split(",") if args.benchmarks else None
-    adapters = base.resolve(names, args.all)                  # selected adapters (or error if none specified)
+    adapters = base.resolve(names)                            # selected adapters (or error if none specified)
     if not args.models:
-        raise SystemExit("specify --models (comma-separated tags from models.yaml).")
-    models = load_models(args.models.split(","))             # selected models
+        raise SystemExit("specify --models (comma-separated tags from models.yaml, or 'all').")
+    tags = None if args.models == "all" else args.models.split(",")  # 'all' -> every model in models.yaml
+    models = load_models(tags)                               # selected models
 
     failures: list[str] = []
     for adapter in adapters:

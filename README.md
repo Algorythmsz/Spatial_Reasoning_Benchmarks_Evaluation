@@ -1,4 +1,4 @@
-# POST_CRISP — spatial benchmark harness
+# Spatial Reasoning Benchmark harness
 
 Run multimodal (Qwen-VL etc.) models on spatial-reasoning benchmarks and score them,
 in three separate steps:
@@ -7,8 +7,8 @@ in three separate steps:
 |---|---|---|---|
 | 1. prepare | `data_preparation.py` | inference env | download raw data (HF) → build a model-agnostic ms-swift jsonl |
 | 2. infer | `infer.py` | inference env | `swift infer` each model over that jsonl → predictions + a `done.flag` |
-| 3. score | `evaluate.py` | scorer env (gpt-oss is needed at SpatialScore) | predictions → run the scorer → `metrics.json` |
-- 2 environments are needed. One for 'ms-swift' and one for evaluating SpatialScore.
+| 3. score | `evaluate.py` | inference env (scoring env for SpatialScore) | predictions → run the scorer → `metrics.json` |
+- 2 environments are needed: the inference env, plus a scoring env for SpatialScore's LLM judge.
 - **Benchmarks:** `spatialscore`, `multihopspatial`, `refspatial_expand` (in `benchmarks/`).
   *(`spatialscore` and `refspatial_expand` are wired end-to-end. `multihopspatial` runs
   inference but its scorer is not implemented yet — reshape/score raise NotImplementedError.)*
@@ -16,27 +16,23 @@ in three separate steps:
 
 ---
 
-## Step 0 — one-time setup
+## ⚙️ Setup - for one time
 
-### 0a. Conda environments
+### a. Conda environments
 
-You need one **inference** env and one **scoring** env (that has each benchmark's deps).
-**Name them whatever you like** — the scripts run in whatever conda env is active and
-don't check names. Just make sure you activate an env that has the right deps for the
-step you're running:
+The **inference** env covers most of the pipeline. A separate **scoring** env is needed
+only to score **SpatialScore** (its LLM-judge stage). Everything else — including scoring
+`multihopspatial`/`refspatial_expand` — runs in the inference env.
+**Name them whatever you like** - just activate the right one:
 
 | env (any name) | used by | must contain |
 |---|---|---|
-| inference | steps 1 & 2 | `ms-swift`, `vllm`, `huggingface_hub`, `datasets` |
-| scoring | step 3 | `vllm` + judge LLM (`openai/gpt-oss-20b`), `tqdm`, and the vendored scorer's deps: `torch`, `torchvision`, `matplotlib`, `numpy`, `pillow` |
-
-One scoring env covers **all** benchmarks: spatialscore drives the heavy list above, and
-refspatial_expand/multihopspatial only need `numpy`/`pillow`/`PyYAML`, which that list
-already includes — so the spatialscore env is a superset and there's no need to split it.
+| inference | steps 1 & 2, **and** scoring `multihopspatial` / `refspatial_expand` | `ms-swift`, `vllm`, `huggingface_hub`, `datasets` |
+| scoring | step 3 for **SpatialScore only** | `vllm` + judge LLM (`openai/gpt-oss-20b`), `tqdm`, and the vendored scorer's deps: `torch`, `torchvision`, `matplotlib`, `numpy`, `pillow` |
 
 Per-env dependency lists live in `requirements/`.
 
-#### How to build the inference env
+#### How to build an inference env
 
 ```bash
 # 1. fresh env
@@ -54,11 +50,11 @@ python -c "import vllm; print('vllm', vllm.__version__)"
 pip freeze > requirements/infer.lock.txt
 ```
 
-#### How to build the scoring env
+#### How to build a scoring env
 
 Python 3.10 + CUDA 12.8. `requirements/score.txt` pins the working set
 (vllm 0.11 + torch 2.8+cu128 + the vendored scorer's deps) and includes the cu128 index.
-This single env scores every benchmark (see note above).
+You only need this env to score SpatialScore (see note above).
 
 ```bash
 # 1. fresh env
@@ -75,20 +71,18 @@ python -c "import vllm, torch, torchvision, matplotlib, openai_harmony; print('t
 pip freeze > requirements/score.lock.txt
 ```
 
-### 0b. Designate where to download the model weights from Huggingface
+### b. Designate where to cache the model weights from Hugging Face (Optional)
 
-`models.yaml` uses HF repo ids. Two things make them resolve correctly:
+`models.yaml` uses HF repo ids. Point HF at where you want them cached:
 
 ```bash
-export USE_HF=1                
-export HF_HOME=<where-to-download-the-model>  # where to download the model
+export HF_HOME=<hf-cache-dir>   # download destination for model weights
 ```
 
-Put these in your shell profile (`~/.bashrc`) or the env's activation hook
-(`$CONDA_PREFIX/etc/conda/activate.d/`) so you don't retype them — **not** in this repo.
-Without them, a repo id re-downloads (e.g. a 27B model) instead of using your cache.
+Put this in your shell profile (`~/.bashrc`) or the env's activation hook
+(`$CONDA_PREFIX/etc/conda/activate.d/`) so you don't retype it.
 
-### 0c. Designate where to download/store data/outputs
+### c. Designate where to download/store data/outputs (Optional)
 
 By default benchmark data and outputs land **inside the repo** (home disk). SpatialScore
 alone is ~15.8 GB — if home is tight, point these at a big disk:
@@ -98,16 +92,13 @@ export BENCH_DATA_DIR=<where-to-download-the-data>/post_crisp/data   # raw + pre
 export POST_CRISP_ROOT=<where-to-store-the-results>/post_crisp       # cache / preds / results
 ```
 
-`BENCH_DATA_DIR` is separate from `POST_CRISP_ROOT` — set **both**, or benchmark data
-still defaults into the repo. (Fine-grained overrides: `CACHE_DIR` / `PREDS_DIR` /
-`RESULTS_DIR`; see `benchmarks/base.py`.)
 
 ---
 
-## Step 1 — prepare data
+## 📁 Prepare data
 
 Downloads each benchmark's raw data (into `benchmarks/data/<name>/`) and builds the
-ms-swift input jsonl. Idempotent — re-running only regenerates when data/prompts change.
+ms-swift input jsonl. 
 
 ```bash
 conda activate <inference-env>
@@ -116,7 +107,7 @@ python data_preparation.py spatialscore     # or: multihopspatial | refspatial_e
 
 ---
 
-## Step 2 — run inference
+## 🤖 Run inference
 
 Runs `swift infer` for each model over the prepared jsonl. Predictions go to
 `preds/<model-tag>/<benchmark>.jsonl`, plus a `done.flag` marking a clean finish.
@@ -125,31 +116,32 @@ are injected automatically. We disabled Qwen3.5 models' thinking mode by default
 
 ```bash
 conda activate <inference-env>
-export USE_HF=1                          # (+ HF_HOME if not default)
 python infer.py --benchmarks spatialscore --models qwen3vl-4b,qwen3.5-4b
 ```
 
-Options: `--all` (every benchmark), `--max-new-tokens N` (default 512).
+Options: `--benchmarks all` (every benchmark), `--models all` (every model in `models.yaml`), `--max-new-tokens N` (default 512).
 
-Multiple models in one call load sequentially, and inference frees the GPU between them
-(best-effort teardown). If a multi-model run OOMs — vllm doesn't always fully release
-in-process — split it into one `infer.py` run per model (a fresh process is the only
-guaranteed reclaim).
+Passing multiple models in one call loads them sequentially in the same process, which can
+OOM — vllm doesn't always fully release the GPU between models. Prefer **one model per run**
+(a fresh process is the only guaranteed reclaim). To run several at once, launch each as its
+own job in parallel.
 
 ---
 
-## Step 3 — score
+## 📈 Scoring
 
-Activate an env that has the benchmark's scoring deps (Step 0a) **first**, then run.
-Scoring reshapes the predictions and runs the scorer; results land in
+**SpatialScore needs the scoring env** (LLM judge); the other benchmarks score in the
+inference env. Activate the right one, then run — scoring reshapes the predictions and runs
+the scorer; results land in
 `results/<model-tag>/<benchmark>/` (`all_results.json`, `summary_report.json`, `metrics.json`).
 
 ```bash
-conda activate <your scoring env>
+conda activate <scoring-env>        # SpatialScore; use the inference env for the other two
 python evaluate.py --benchmarks spatialscore --models qwen3vl-4b,qwen3.5-4b
 ```
 
-Evaluation code for SpatialScore is `scorers/spatialscore/evaluate_reesults.py`. The code is originally from official SpatialScore code base, but we locally copied it to this code base.
+SpatialScore's scorer lives at `benchmarks/scorers/spatialscore/evaluate_results.py` — a
+local copy of the official SpatialScore code, vendored here so scoring is self-contained.
 
 Optional:
 
@@ -161,63 +153,59 @@ Other optional overrides: `SS_LLM_PATH` (judge, default `openai/gpt-oss-20b`),
 
 ---
 
-## Step 4 — collect results into a table
+## 📊 Make a table for results
 
 `make_table.py` scans `results/<model-tag>/<benchmark>/metrics.json` and prints an
-accuracy leaderboard (sorted by overall). Only models whose scoring finished appear;
-scored-but-incomplete models are listed as skipped, not silently dropped.
+accuracy leaderboard (sorted by overall). Scored models appear; ones without a
+`metrics.json` (OOM'd or failed) are listed as skipped.
 
 It reads the **same** `POST_CRISP_ROOT` / `RESULTS_DIR` env vars as the rest of the
-pipeline (Step 0c), so point it at wherever your results live. If you redirected outputs
+pipeline (Step c), so point it at wherever your results live. If you redirected outputs
 off the home disk, either prefix each run or `export` it once for the session:
 
 ```bash
-export POST_CRISP_ROOT=<where-you-stored-the-results>/post_crisp   # same value you used in Step 0c
-python make_table.py                           # overall accuracy, all scored models
-python make_table.py --breakdown category      # add per-category columns
-python make_table.py --csv spatialscore.csv    # also write a CSV
+export POST_CRISP_ROOT=<where-you-stored-the-results>/post_crisp        # same value as Step c; skip if already exported this session
+python make_table.py --bench spatialscore                              # overall accuracy, all scored models
+python make_table.py --bench spatialscore --breakdown category         # add per-category columns
+python make_table.py --bench spatialscore --csv spatialscore.csv       # also write a CSV
 ```
 
 `--breakdown` accepts `category`, `task`, `sub_task`, or `source_dataset`.
-A `--csv` given as a **bare filename** is written under `POST_CRISP_ROOT/table/`
-(e.g. `table/spatialscore.csv`); pass an absolute path to write elsewhere.
-(`RESULTS_DIR` / `TABLE_DIR` override those two locations directly.)
 
 ---
 
-## Full example from scratch (qwen3vl-4b + qwen3.5-4b on spatialscore)
+## Full example from scratch (qwen3vl-4b + qwen3.5-4b on SpatialScore)
 
 ```bash
-# 0a) build the two conda envs (once, ever — see Step 0a for details/notes)
+# a) build the envs (once, ever — see Step a for details/notes)
 conda create -n infer-env python=3.11 -y
 conda activate infer-env
 pip install -r requirements/infer.txt            # ms-swift + vllm inference stack
 
-conda create -n score-env python=3.10 -y
+conda create -n score-env python=3.10 -y         # only needed to score SpatialScore
 conda activate score-env
-pip install -r requirements/score.txt            # single scoring env (all benches; cu128 torch)
+pip install -r requirements/score.txt            # judge LLM + cu128 torch/torchvision/matplotlib
 
-# 0b/0c) env vars (set once per session; put in ~/.bashrc to skip retyping)
-export USE_HF=1                                   # use HuggingFace, not ModelScope
-export HF_HOME=<where-to-download-the-model>                    # where models download/cache; omit for ~/.cache/huggingface
-export BENCH_DATA_DIR=<where-to-download-the-data>/post_crisp/data  # where benchmark data downloads; omit to keep in-repo
-export POST_CRISP_ROOT=<where-to-store-the-results>/post_crisp      # where preds/results/table land; omit to keep in-repo
+# b/c) env vars (optional — all have defaults; put in ~/.bashrc to skip retyping)
+export HF_HOME=<hf-cache-dir>                                       # model cache; omit for ~/.cache/huggingface
+export BENCH_DATA_DIR=<data-disk>/post_crisp/data                   # benchmark data; omit to keep in-repo
+export POST_CRISP_ROOT=<results-disk>/post_crisp                    # preds/results/table; omit to keep in-repo
 
 # 1) prepare
 conda activate infer-env
 python data_preparation.py spatialscore
 
-# 2) infer  (multiple models OK; GPU is freed between them — split if a run OOMs)
+# 2) infer  (one model per run is safest; loads sequentially otherwise — see Run inference)
 python infer.py --benchmarks spatialscore --models qwen3vl-4b,qwen3.5-4b
 
-# 3) score  (single scoring env — has vllm + torch/torchvision/matplotlib for every bench)
+# 3) score  (SpatialScore needs the scoring env; the other benches score in infer-env)
 conda activate score-env
 python evaluate.py --benchmarks spatialscore --models qwen3vl-4b,qwen3.5-4b
 cat results/qwen3.5-4b/spatialscore/summary_report.json
 
 # 4) collect all scored models into a leaderboard
-#    (same session as above → env vars still apply; new shell → re-export step 0 first)
-python make_table.py
+#    (same session as above → env vars still apply; new shell → re-export step b/c first)
+python make_table.py --bench spatialscore
 ```
 
 ## Where things land

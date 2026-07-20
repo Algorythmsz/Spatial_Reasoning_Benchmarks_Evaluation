@@ -11,3 +11,6 @@ preds/
 results/
 table/
 benchmarks/data/
+
+# Parallel-infer logs (run_infer_parallel.sh)
+logs/
