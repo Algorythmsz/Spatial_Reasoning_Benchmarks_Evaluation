@@ -42,24 +42,6 @@ from pathlib import Path
 
 from benchmarks import base  # importing the package registers all adapters
 
-MODELS_YAML = Path(os.environ.get("MODELS_YAML", Path(__file__).resolve().parent / "models.yaml"))
-
-
-# ── models.yaml -> [Model] ───────────────────────────────────────────────────
-def load_models(tags: list[str] | None = None) -> list[base.Model]:
-    import yaml
-
-    spec = yaml.safe_load(MODELS_YAML.read_text())
-    models = [base.Model.from_dict(m) for m in spec.get("models", [])]
-    if tags:                                                   # keep only requested tags, preserving request order
-        by_tag = {m.tag: m for m in models}
-        missing = [t for t in tags if t not in by_tag]
-        if missing:
-            raise SystemExit(f"unknown model tag(s): {missing}. known: {sorted(by_tag)}")
-        models = [by_tag[t] for t in tags]
-    return models
-
-
 # ── resolve a model to a concrete path swift can load ────────────────────────
 def resolve_model_path(model: base.Model) -> str:
     """HF repo id / local dir pass through; repo-id + subfolder is downloaded to a local dir."""
@@ -110,7 +92,7 @@ def _release_gpu() -> None:
 
 # ── run inference for one (adapter, model) ───────────────────────────────────
 def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens: int) -> None:
-    val = adapter.preprocess()                                # model-agnostic ms-swift jsonl (idempotent)
+    val = adapter.preprocess()                                # check if the jsonl file is in format for inference
     preds = adapter.preds_path(model)
     preds.parent.mkdir(parents=True, exist_ok=True)
     if preds.exists():                                        # start clean so the line count reflects this run
@@ -160,7 +142,7 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
 
     print(f"[infer] infer {adapter.name}/{model.tag}: infer_main({kwargs})")
     try:
-        infer_main(InferArguments(**kwargs))                 # raises on failure -> mark_done skipped (crash-safe)
+        infer_main(InferArguments(**kwargs))                 # inference code! Raises on failure -> mark_done skipped (crash-safe)
     finally:
         for name, prev in saved_env.items():                 # restore pixel env so the next model isn't polluted
             if prev is None:
@@ -195,7 +177,7 @@ def main() -> int:
     if not args.models:
         raise SystemExit("specify --models (comma-separated tags from models.yaml, or 'all').")
     tags = None if args.models == "all" else args.models.split(",")  # 'all' -> every model in models.yaml
-    models = load_models(tags)
+    models = base.load_models(tags)
 
     failures: list[str] = []
     for model in models:

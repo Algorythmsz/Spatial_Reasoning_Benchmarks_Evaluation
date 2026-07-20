@@ -105,6 +105,27 @@ class Model:
         )
 
 
+# ── models.yaml -> [Model] (shared by infer.py + evaluate.py) ────────────────
+# base.py lives in benchmarks/, so the repo-root models.yaml is one level up.
+MODELS_YAML = Path(os.environ.get("MODELS_YAML", Path(__file__).resolve().parent.parent / "models.yaml"))
+
+
+def load_models(tags: list[str] | None = None) -> list["Model"]:
+    """Load models.yaml -> [Model]. With `tags`, keep only those (request order preserved,
+    unknown tags error out); with tags=None, return every model in the file."""
+    import yaml                                                 # lazy: keep base.py top-level stdlib-only
+
+    spec = yaml.safe_load(MODELS_YAML.read_text())
+    models = [Model.from_dict(m) for m in spec.get("models", [])]
+    if tags:                                                    # keep only requested tags, preserving request order
+        by_tag = {m.tag: m for m in models}
+        missing = [t for t in tags if t not in by_tag]
+        if missing:
+            raise SystemExit(f"unknown model tag(s): {missing}. known: {sorted(by_tag)}")
+        models = [by_tag[t] for t in tags]
+    return models
+
+
 # ── Adapter registry (name -> class) ─────────────────────────────────────────
 # Note: an adapter module must be imported to be registered.
 #       benchmarks/__init__.py imports all adapters to populate REGISTRY.

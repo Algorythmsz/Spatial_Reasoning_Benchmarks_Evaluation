@@ -15,35 +15,16 @@ Drives the SCORING half of the pipeline. For each (benchmark, model):
 Usage:
     conda activate <an env with the scorer's deps>
     python evaluate.py --benchmarks spatialscore --models qwen3.5-27b,qwen3vl-8b
+    python evaluate.py --benchmarks all --models all      # every benchmark × every scored model
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-from pathlib import Path
 
 from benchmarks import base  # importing the package registers all adapters
-
-MODELS_YAML = Path(os.environ.get("MODELS_YAML", Path(__file__).resolve().parent / "models.yaml"))
-
-
-# ── models.yaml -> [Model] ───────────────────────────────────────────────────
-def load_models(tags: list[str] | None = None) -> list[base.Model]:
-    import yaml
-
-    spec = yaml.safe_load(MODELS_YAML.read_text())
-    models = [base.Model.from_dict(m) for m in spec.get("models", [])]
-    if tags:                                                   # keep only requested tags, preserving request order
-        by_tag = {m.tag: m for m in models}
-        missing = [t for t in tags if t not in by_tag]
-        if missing:
-            raise SystemExit(f"unknown model tag(s): {missing}. known: {sorted(by_tag)}")
-        models = [by_tag[t] for t in tags]
-    return models
-
 
 # ── pretty-print one model's metrics to the terminal ─────────────────────────
 def print_summary(bench: str, tag: str, metrics: dict) -> None:
@@ -95,7 +76,7 @@ def main() -> int:
     if not args.models:
         raise SystemExit("specify --models (comma-separated tags from models.yaml, or 'all').")
     tags = None if args.models == "all" else args.models.split(",")  # 'all' -> every model in models.yaml
-    models = load_models(tags)                               # selected models
+    models = base.load_models(tags)                          # selected models
 
     failures: list[str] = []
     for adapter in adapters:
