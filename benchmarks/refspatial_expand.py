@@ -11,12 +11,52 @@ model must POINT to the target location(s). The dataset suffix asks for normaliz
 0-1 tuples, e.g. "[(0.25, 0.40)]".
 
 Scoring (RoboRefer point-in-mask metric; needs PIL + numpy):
-  - Parse predicted points out of the free-text answer (_text2pts).
+  - Parse predicted points out of the free-text answer; non-point matches
+    (e.g. boxes) are ignored, matching the official evaluator.
   - Per-sample accuracy = fraction of predicted points that land inside the GT mask
-    (out-of-bounds points count as misses; empty prediction -> 0.0).
+    (out-of-bounds points count as misses; no parseable points -> 0.0).
   - Aggregated overall and by subset (Location/Placement) / step / category.
-Env knob: RS_ABSOLUTE=1 treats every coord as absolute pixels rather than normalized
-(for models that emit pixels regardless of the prompt).
+
+──────────────────────────────────────────────────────────────────────────────
+COORDINATE / PROMPT CONVENTIONS  (why there is more than one mode)
+──────────────────────────────────────────────────────────────────────────────
+Qwen3-VL / Qwen3.5 do NOT obey the dataset's "0-1 tuple" suffix: they emit points in a
+0-1000 normalized space (ms-swift's qwen template logs `norm_bbox: norm1000`). Scoring
+those numbers as-is under-reproduces badly (acc ~0.05-0.10), so we support env-selected
+conventions:
+
+  RS_PROMPT   (read in to_messages, BAKED into the fingerprinted jsonl):
+    "official" (default) -> append the dataset `suffix` (asks for 0-1 tuples).
+    "qwen_json"          -> cookbook prompt: '<expr>. Output the point coordinates in
+                            JSON format.' -> model returns [{"point_2d": [x, y], ...}].
+    Either prompt is scored correctly by RS_COORD=qwen1000, so re-inference is optional.
+
+  RS_COORD    score() ALWAYS computes BOTH conventions below and persists both (per-
+              question "accuracy_normalized"/"accuracy_qwen1000" in all_results.json, and
+              summary_report.json's "by_mode"). RS_COORD only picks the PRIMARY — the value
+              that feeds metrics.json / make_table / the terminal readout and the per-
+              question "accuracy" field (default: "normalized").
+    "normalized" (default) -> official _text2pts: float coords scale by (W, H);
+                              integer coords are absolute ORIGINAL pixels.
+                              RS_ABSOLUTE=1 skips the float scaling (models that emit
+                              original pixels regardless of prompt).
+    "qwen1000"   (Qwen3-VL / Qwen3.5, RECOMMENDED) -> Qwen's norm1000 convention:
+                              coords are normalized to 0-1000, NOT 0-1 and NOT pixels.
+                              Confirmed by ms-swift itself (`norm_bbox: norm1000`), by the
+                              emitted ranges (y hits ~1000 while the image is only ~450
+                              tall), and empirically (re-scoring lifts acc ~5-7x). Outputs
+                              MIX conventions in practice, so a per-value magnitude rule
+                              maps each coord: v in [0,1] -> v*dim (the model obeying the
+                              0-1 suffix); |v|>1 -> v/1000*dim (norm1000). Parses BOTH the
+                              (x, y) tuple format (default prompt) and JSON point_2d
+                              (RS_PROMPT=qwen_json) — so existing tuple preds can be
+                              re-scored with NO re-inference.
+
+To reproduce Qwen3-VL / Qwen3.5 RefSpatial numbers:
+    Just re-score existing preds with  RS_COORD=qwen1000  (no re-inference needed —
+    the norm1000 magnitude rule handles the tuple-format output the default prompt
+    already produced). RS_PROMPT=qwen_json (cookbook JSON output) is optional and also
+    scored correctly by qwen1000.
 
 This adapter implements the whole pipeline: ensure_data (HF download), load_raw,
 to_messages (preprocess), reshape (preds jsonl -> scorer schema), and score.
@@ -75,10 +115,27 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
     def _abs(self, subset: str, rel: str) -> str:
         return str((self.data_dir / subset / rel).resolve())
 
+    # Cookbook grounding prompt (Qwen3-VL spatial_understanding.ipynb, Part 2):
+    # a referring expression followed by an explicit request for JSON point output.
+    # The model then returns [{"point_2d": [x, y], "label": ...}] in the format it was
+    # trained on (see RS_PROMPT / RS_COORD notes in the module docstring).
+    QWEN_JSON_SUFFIX = "Output the point coordinates in JSON format."
+
     def to_messages(self, row: dict[str, Any]) -> dict[str, Any]:
+        import os
+
         subset = row["_subset"]
         prompt = row.get("prompt") or ""
-        suffix = row.get("suffix") or ""
+        # RS_PROMPT selects the instruction, and — because preprocess() fingerprints
+        # the built jsonl — the choice is BAKED into the cached file: flipping the env
+        # changes the fingerprint and auto-regenerates (base.py::preprocess). Keep it
+        # consistent across preprocess+infer for a given run.
+        #   official  -> dataset suffix (0-1 normalized tuple), model-agnostic default.
+        #   qwen_json -> cookbook JSON grounding prompt for Qwen-VL native output.
+        if os.environ.get("RS_PROMPT", "official") == "qwen_json":
+            suffix = self.QWEN_JSON_SUFFIX
+        else:
+            suffix = row.get("suffix") or ""
         text = f"{prompt} {suffix}".strip()
         images = [self._abs(subset, row["rgb_path"])] if row.get("rgb_path") else []
         meta = {
@@ -129,36 +186,93 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
             json.dump(entries, f, ensure_ascii=False, indent=2)
         print(f"[refspatial_expand reshape] {len(entries)} rows -> {out}")
 
-    # ── point parsing (ported from RoboRefer Evaluation/summarize_acc.py::text2pts) ──
-    # The dataset suffix asks for normalized 0-1 tuples "[(x1, y1)]", so the default is
-    # is_absolute=False: float coords are scaled by (width, height); integers are taken
-    # as absolute pixels (RoboRefer's own heuristic). Set RS_ABSOLUTE=1 to treat every
-    # coord as absolute pixels (mirrors RoboRefer's Qwen/RoboBrain branch) if a model
-    # ignores the prompt and emits pixels.
+    # ── point parsing (ported verbatim from the official RefSpatial-Expand-Bench eval) ──
+    # The authoritative evaluator (dataset card) parses ONLY (x, y) points:
+    #   - a coord is scaled by (W, H) when it is a float; integer coords are absolute pixels.
+    #   - matches that are not 2-tuples (e.g. 4-number boxes) are IGNORED — they contribute
+    #     no points, so a box-only or unparseable prediction yields [] and scores 0.0.
+    # There is no box branch and no is_absolute knob in the official code; we keep an optional
+    # RS_ABSOLUTE=1 (is_absolute) toggle that additionally skips float scaling for models that
+    # emit absolute pixels, but the default (is_absolute=False) is bit-identical to the official.
     @staticmethod
-    def _text2pts(text: str, width: int, height: int, is_absolute: bool):
+    def _text2pts(text: str, width: int, height: int, is_absolute: bool) -> list[tuple[int, int]]:
         import re
-        import numpy as np
 
         pattern = r"\(([-+]?\d+\.?\d*(?:,\s*[-+]?\d+\.?\d*)*?)\)"
-        points: list[Any] = []
+        points: list[tuple[int, int]] = []
         for match in re.findall(pattern, text or ""):
             vector = [float(n) if "." in n else int(n) for n in match.split(",")]
-            if len(vector) == 2:
+            if len(vector) == 2:                               # official: points only
                 x, y = vector
                 if not is_absolute and (isinstance(x, float) or isinstance(y, float)):
                     x, y = int(x * width), int(y * height)
-                points.append((x, y))
-            elif len(vector) == 4:                             # a box -> fill every pixel inside it
-                x0, y0, x1, y1 = vector
-                if not is_absolute:
-                    x0, y0 = int(x0 * width), int(y0 * height)
-                    x1, y1 = int(x1 * width), int(y1 * height)
-                w, h = max(0, int(x1) - int(x0)), max(0, int(y1) - int(y0))
-                if w and h:
-                    ys, xs = np.where(np.ones((h, w)))
-                    points.extend(list(np.stack([xs + int(x0), ys + int(y0)], axis=1)))
-        return np.array(points) if points else np.empty((0, 2), dtype=int)
+                points.append((int(x), int(y)))
+        return points
+
+    # ── Qwen cookbook JSON parsing (RS_COORD=qwen) ──
+    # Mirrors decode_json_points() from spatial_understanding.ipynb: strip a ```json
+    # fence, json.loads, read each item's "point_2d": [x, y]. Falls back to a regex
+    # over bare "point_2d" pairs when the response has prose around the JSON or the
+    # JSON is malformed. Coords are returned RAW (resized-frame pixels); the caller
+    # applies the smart_resize inverse-transform. No normalized/pixel guessing here.
+    @staticmethod
+    def _json2pts(text: str) -> list[tuple[float, float]]:
+        import re
+
+        raw = text or ""
+        if "```json" in raw:                                   # ```json ... ``` fence -> inner block
+            raw = raw.split("```json", 1)[1].split("```", 1)[0]
+        elif "```" in raw:                                     # generic fence
+            raw = raw.split("```", 1)[1].split("```", 1)[0]
+
+        pts: list[tuple[float, float]] = []
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):                         # tolerate a single object
+                data = [data]
+            for item in data:
+                if isinstance(item, dict) and "point_2d" in item:
+                    xy = item["point_2d"]
+                    if isinstance(xy, (list, tuple)) and len(xy) == 2:
+                        pts.append((float(xy[0]), float(xy[1])))
+        except Exception:
+            pass
+        if pts:
+            return pts
+        # Fallback: pull "point_2d": [x, y] pairs out of surrounding text.
+        for mx, my in re.findall(
+            r'"point_2d"\s*:\s*\[\s*([-+]?\d+\.?\d*)\s*,\s*([-+]?\d+\.?\d*)\s*\]', text or ""
+        ):
+            pts.append((float(mx), float(my)))
+        return pts
+
+    # ── Qwen norm1000 coords (RS_COORD=qwen1000) ──
+    # ms-swift's qwen template uses norm_bbox=norm1000: Qwen3-VL/3.5 emit point coords in
+    # a 0-1000 normalized space (NOT the 0-1 the dataset suffix asks for, and NOT resized-
+    # frame pixels). In practice outputs MIX conventions within a single run, so we decide
+    # per value by magnitude:
+    #   |v| <= 1  -> v * dim          (the model did obey the 0-1 suffix)
+    #   |v|  > 1  -> v / 1000 * dim   (norm1000: integers like 745, or floats like 580.0)
+    # This magnitude rule matched or beat the int-vs-float-type rule on every model tested
+    # (and both beat a blanket /1000, which mangles the genuine 0-1 outputs). We accept the
+    # (x, y) tuple format (default prompt) OR JSON point_2d (RS_PROMPT=qwen_json): try JSON
+    # first, fall back to tuples — so tuple-format preds re-score with no re-inference.
+    @staticmethod
+    def _norm1000_pts(text: str, width: int, height: int) -> list[tuple[int, int]]:
+        import re
+
+        raw = RefSpatialExpandAdapter._json2pts(text)      # JSON point_2d (qwen_json prompt)
+        if not raw:                                        # else (x, y) tuples (default prompt)
+            for match in re.findall(r"\(([-+]?\d+\.?\d*(?:,\s*[-+]?\d+\.?\d*)*?)\)", text or ""):
+                nums = [float(n) for n in match.split(",")]
+                if len(nums) == 2:
+                    raw.append((nums[0], nums[1]))
+        points: list[tuple[int, int]] = []
+        for x, y in raw:
+            x = x * width if abs(x) <= 1 else x / 1000 * width
+            y = y * height if abs(y) <= 1 else y / 1000 * height
+            points.append((int(x), int(y)))
+        return points
 
     # Score: fraction of predicted points that land inside the GT mask (RoboRefer metric).
     def score(self, in_dir: Path) -> dict[str, Any]:
@@ -174,18 +288,39 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
         with open(results_path, encoding="utf-8") as f:
             answers = json.load(f)
 
+        # ── coord interpretation (see module docstring) ──
+        # We ALWAYS score under BOTH conventions and persist both, so normalized and
+        # qwen1000 are directly comparable with no re-run. RS_COORD only picks the PRIMARY
+        # one — the value that feeds metrics.json / make_table / the terminal summary and
+        # the per-question "accuracy" field (default: normalized). The other is still saved
+        # (per-question "accuracy_<mode>", and summary_report's "by_mode").
+        #   normalized -> official _text2pts (float*WH / int=pixel); RS_ABSOLUTE=1 skips the
+        #                 float scaling (models emitting original pixels regardless of prompt).
+        #   qwen1000   -> Qwen norm1000 magnitude rule (_norm1000_pts).
+        MODES = ("normalized", "qwen1000")
+        primary = os.environ.get("RS_COORD", "normalized").lower()
+        if primary not in MODES:
+            primary = "normalized"
         is_absolute = os.environ.get("RS_ABSOLUTE", "0") == "1"
 
-        per_subset: dict[str, list[float]] = defaultdict(list)
-        per_step: dict[str, list[float]] = defaultdict(list)
-        per_category: dict[str, list[float]] = defaultdict(list)
-        all_acc: list[float] = []
+        def _parse(text: str, w: int, h: int, mode: str) -> list[tuple[int, int]]:
+            if mode == "qwen1000":
+                return self._norm1000_pts(text, w, h)
+            return self._text2pts(text, w, h, is_absolute)
+
+        # per-mode accumulators: overall list + the three breakdown groups
+        acc_all: dict[str, list[float]] = {m: [] for m in MODES}
+        by_subset = {m: defaultdict(list) for m in MODES}
+        by_step = {m: defaultdict(list) for m in MODES}
+        by_category = {m: defaultdict(list) for m in MODES}
         missing = 0
 
         for a in answers:
             mask_path = a.get("mask_path")
             if not mask_path or not os.path.exists(mask_path):
                 missing += 1
+                for m in MODES:
+                    a[f"accuracy_{m}"] = None
                 a["accuracy"] = None
                 continue
 
@@ -196,56 +331,70 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
                 mask = mask[:, :, 0]
             mask = (mask > 0).astype(np.uint8)
 
-            pts = self._text2pts(a.get("text", ""), mask.shape[1], mask.shape[0], is_absolute)
-
             # acc = (# predicted points inside the mask) / (# predicted points).
-            # In-bounds points score mask[y, x] (1 inside, 0 outside); out-of-bounds
-            # points are appended as explicit zeros so they count as misses in the mean.
-            # No predicted points -> acc stays 0.0.
-            acc = 0.0
-            if len(pts) > 0:
-                pts = pts.astype(int)
-                in_range = (
-                    (pts[:, 0] >= 0) & (pts[:, 0] < mask.shape[1])
-                    & (pts[:, 1] >= 0) & (pts[:, 1] < mask.shape[0])
-                )
-                hits = mask[pts[in_range, 1], pts[in_range, 0]]           # 1 if inside mask, 0 if outside
-                acc = float(np.concatenate([hits, np.zeros(len(pts) - int(in_range.sum()))]).mean())
-
-            a["accuracy"] = acc
-            all_acc.append(acc)
-            per_subset[a.get("subset") or "?"].append(acc)
-            per_step[str(a.get("step"))].append(acc)
-            per_category[a.get("category") or "?"].append(acc)
+            # Out-of-image points count as misses; no parseable points -> acc = 0.0
+            # (matches the official evaluator: a failed/box-only prediction scores 0).
+            # NOTE: (h, w) is the ORIGINAL-image frame (mask is stored at full image
+            # resolution), which is also the reference frame for the mask lookup below.
+            h, w = mask.shape
+            text = a.get("text", "") or ""
+            subset, step, category = a.get("subset") or "?", str(a.get("step")), a.get("category") or "?"
+            for m in MODES:
+                pts = _parse(text, w, h, m)
+                if pts:
+                    hits = sum(1 for x, y in pts if 0 <= x < w and 0 <= y < h and mask[y, x] > 0)
+                    acc = hits / len(pts)
+                else:
+                    acc = 0.0
+                a[f"accuracy_{m}"] = acc
+                acc_all[m].append(acc)
+                by_subset[m][subset].append(acc)
+                by_step[m][step].append(acc)
+                by_category[m][category].append(acc)
+            a["accuracy"] = a[f"accuracy_{primary}"]           # primary (backward-compat field)
 
         def _agg(d: dict[str, list[float]]) -> dict[str, dict[str, float]]:
             return {k: {"n": len(v), "acc": float(np.mean(v)) if v else 0.0} for k, v in sorted(d.items())}
 
-        # rich provenance report -> summary_report.json (keeps native by_* keys, n/acc, flags)
+        def _mode_report(m: str) -> dict[str, Any]:
+            return {
+                "overall": {"n": len(acc_all[m]), "acc": float(np.mean(acc_all[m])) if acc_all[m] else 0.0},
+                "by_subset": _agg(by_subset[m]),
+                "by_step": _agg(by_step[m]),
+                "by_category": _agg(by_category[m]),
+            }
+
+        reports = {m: _mode_report(m) for m in MODES}
+
+        # summary_report.json: BOTH modes under "by_mode"; top-level mirrors the primary.
         summary = {
-            "overall": {"n": len(all_acc), "acc": float(np.mean(all_acc)) if all_acc else 0.0},
-            "by_subset": _agg(per_subset),
-            "by_step": _agg(per_step),
-            "by_category": _agg(per_category),
-            "is_absolute": is_absolute,
+            **reports[primary],                                # overall/by_subset/by_step/by_category (primary)
+            "primary_coord_mode": primary,
+            "is_absolute": is_absolute,                        # only meaningful for the normalized mode
             "missing_mask": missing,
+            "by_mode": reports,                                # normalized + qwen1000 (full breakdowns)
         }
-        with open(results_path, "w", encoding="utf-8") as f:   # per-question accuracy back into all_results.json
+        with open(results_path, "w", encoding="utf-8") as f:   # per-question accuracy_* back into all_results.json
             json.dump(answers, f, ensure_ascii=False, indent=2)
         with open(in_dir / "summary_report.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
-        print(f"[refspatial_expand score] overall acc={summary['overall']['acc']:.4f} "
-              f"(n={summary['overall']['n']}, missing_mask={missing}, is_absolute={is_absolute})")
+        print("[refspatial_expand score] "
+              + "  ".join(f"{m}={reports[m]['overall']['acc']:.4f}" for m in MODES)
+              + f"  (primary={primary}, n={reports[primary]['overall']['n']}, missing_mask={missing})")
 
-        # metrics.json -> make_table / evaluate.py print_summary shape ({accuracy, count}).
-        # subset (Location/Placement) -> sub_task, step -> task, so all are addressable via
-        # make_table --breakdown.
+        # metrics.json -> make_table / evaluate.py print_summary shape ({accuracy, count}),
+        # from the PRIMARY mode. subset (Location/Placement) -> sub_task, step -> task.
+        # "by_coord_mode" carries BOTH overalls for comparison (extra key; print_summary /
+        # make_table read only the known keys above, so it is ignored there).
         def _cells(d: dict[str, list[float]]) -> dict[str, dict[str, float]]:
             return {k: {"accuracy": float(np.mean(v)) if v else 0.0, "count": len(v)}
                     for k, v in sorted(d.items())}
         return {
-            "overall": {"accuracy": float(np.mean(all_acc)) if all_acc else 0.0, "count": len(all_acc)},
-            "category": _cells(per_category),
-            "sub_task": _cells(per_subset),
-            "task": _cells(per_step),
+            "overall": {"accuracy": reports[primary]["overall"]["acc"], "count": reports[primary]["overall"]["n"]},
+            "category": _cells(by_category[primary]),
+            "sub_task": _cells(by_subset[primary]),
+            "task": _cells(by_step[primary]),
+            "coord_mode": primary,
+            "by_coord_mode": {m: {"accuracy": reports[m]["overall"]["acc"], "count": reports[m]["overall"]["n"]}
+                              for m in MODES},
         }
