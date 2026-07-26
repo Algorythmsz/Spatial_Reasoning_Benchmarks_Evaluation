@@ -1,22 +1,3 @@
-"""benchmarks/multihopspatial.py — MultihopSpatial adapter.
-
-HF: etri-vilab/MultihopSpatial (dataset)
-    data/multihop_test_4500.json     4500 questions (test split)
-    data/images/*.jpg                COCO-style images (~6.5k)
-
-Questions already include <choice>(a)..(d)</choice> and the bbox request; a system prompt
-(SYSTEM_PROMPT) pins the answer/bbox output format the scorer parses.
-
-Scoring (rule-based, pure stdlib — no numpy/torch):
-  - MCQ accuracy  : parsed answer letter vs gt (parse failure counts as wrong)
-  - Acc@50IoU     : MCQ-correct AND predicted bbox IoU >= 0.5
-  - Avg IoU       : conditional mean IoU over MCQ-correct samples only (paper Sec 5.2)
-Parsing IS part of the metric (a parse failure is wrong / IoU=0); parse-failure and
-coordinate-heuristic rates are logged per sample so "format failure" vs "reasoning
-failure" stays distinguishable. Env knobs: MHS_IOU_THR (default 0.5),
-MHS_STRICT=1 (reject coord scale/xywh rescue heuristics).
-"""
-
 from __future__ import annotations
 
 import json
@@ -282,7 +263,7 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
     def _abs(self, image_path: str) -> str:
         return str((self.data_dir / IMAGES_SUBDIR / image_path).resolve())
 
-    def to_messages(self, row: dict[str, Any]) -> dict[str, Any]:
+    def to_messages(self, row: dict[str, Any], model=None) -> dict[str, Any]:  # model-agnostic prompt; model unused
         question = row.get("question") or ""
         images = [self._abs(row["image_path"])] if row.get("image_path") else []
         messages = [                                           # system pins the answer/bbox output contract
@@ -338,7 +319,7 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
         print(f"[multihopspatial reshape] {len(entries)} rows -> {out}")
 
     # Score: MCQ accuracy + bbox-IoU grounding, aggregated overall / per-hop / per-view.
-    def score(self, in_dir: Path) -> dict[str, Any]:
+    def score(self, in_dir: Path, **opts: Any) -> dict[str, Any]:
         results_path = in_dir / "all_results.json"
         if not results_path.exists():
             raise FileNotFoundError(f"{results_path} not found — run reshape first.")
@@ -370,7 +351,7 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
             iou = iou_xyxy(p.bbox, gt_box) if (p.bbox and gt_box) else 0.0
 
             overall.add(mcq_ok, iou, iou_thr, p)
-            by_hop[f"{r.get('hop', '?')}hop"].add(mcq_ok, iou, iou_thr, p)
+            by_hop[str(r.get("hop", "?"))].add(mcq_ok, iou, iou_thr, p)   # hop values are already "1hop"/"2hop"/"3hop"
             by_view[str(r.get("view", "?"))].add(mcq_ok, iou, iou_thr, p)
 
             r["mcq_correct"] = mcq_ok                          # annotate per-sample for the persisted all_results.json

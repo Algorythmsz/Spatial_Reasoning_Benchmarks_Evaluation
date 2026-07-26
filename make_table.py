@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-"""Collect scored benchmark results into a table.
-
-Scans results/<model_tag>/<bench>/metrics.json (only models whose scoring
-finished — a metrics.json is written last by evaluate.py, so its presence means
-the run completed). Models that OOM'd during inference or failed in the judge
-have no metrics.json and are listed as skipped, not silently dropped.
-
-Usage:
-    POST_CRISP_ROOT="your directory" python make_table.py --bench spatialscore
-    python make_table.py --bench spatialscore --breakdown category --csv out.csv
-
-Env: POST_CRISP_ROOT (default ".") / RESULTS_DIR override the results location,
-matching benchmarks/base.py.
-"""
 from __future__ import annotations
 
 import argparse
@@ -24,10 +9,7 @@ from pathlib import Path
 
 ROOT = Path(os.environ.get("POST_CRISP_ROOT", ".")).resolve()
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", ROOT / "results"))
-# Generated tables land here (POST_CRISP_ROOT/table/); a bare --csv name resolves into it.
 TABLE_DIR = Path(os.environ.get("TABLE_DIR", ROOT / "table"))
-
-# metrics.json groups accuracies under these keys; each maps name -> {accuracy, count}.
 BREAKDOWNS = ("category", "task", "sub_task", "source_dataset")
 
 
@@ -58,7 +40,6 @@ def pct(x: float) -> str:
 
 def build_rows(scored: dict[str, dict], breakdown: str | None) -> tuple[list[str], list[list[str]]]:
     """Header + rows. Always includes Overall; optionally a per-breakdown column set."""
-    # Column order for the breakdown = union of names across models, keeping first-seen order.
     sub_cols: list[str] = []
     if breakdown:
         for m in scored.values():

@@ -1,15 +1,13 @@
 #!/usr/bin/env python
-"""data_preparation.py — benchmark data download + ms-swift preprocessing orchestrator.
-
-For each bench:
-  1) ensure_data()  — download raw data from HF into benchmarks/data/<name>/ .
-  2) preprocess()   — raw -> ms-swift jsonl (benchmarks/data/<name>/<name>.jsonl).
+"""
+data_preparation.py — benchmark data download + ms-swift preprocessing orchestrator.
 
 Usage:
     python data_preparation.py spatialscore
     python data_preparation.py multihopspatial
+    python data_preparation.py refspatial_bench
     python data_preparation.py refspatial_expand
-    python data_preparation.py all              # all three benches
+    python data_preparation.py all
 """
 
 from __future__ import annotations
@@ -17,19 +15,19 @@ from __future__ import annotations
 import argparse
 import sys
 
-from benchmarks import base 
-
-CHOICES = ["spatialscore", "multihopspatial", "refspatial_expand"]
+from benchmarks import base  # importing the package registers every adapter in base.REGISTRY
 
 
 def main() -> int:
+    choices = base.list_adapters()                # dynamic: any registered adapter is valid (no hardcoded list)
     ap = argparse.ArgumentParser(
         description="Download and preprocess benchmark datasets"
     )
-    ap.add_argument("benchmark", choices=CHOICES + ["all"], help="benchmark names ['spatialscore', 'multihopspatial', 'refspatial_expand'](or all)")
+    ap.add_argument("benchmark", choices=choices + ["all"],
+                    help=f"benchmark name ({' | '.join(choices)}) or 'all'")
     args = ap.parse_args()
 
-    names = CHOICES if args.benchmark == "all" else [args.benchmark]
+    names = choices if args.benchmark == "all" else [args.benchmark]
     failures: list[str] = []
 
     for name in names:

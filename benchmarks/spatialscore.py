@@ -1,18 +1,3 @@
-"""benchmarks/spatialscore.py — SpatialScore adapter.
-
-HF: haoningwu/SpatialScore (dataset)
-    SpatialScore_benchmark.ndjson   questions/annotations (~7.6 MB)
-    SpatialScore_benchmark.zip      images (~15.8 GB) 
-
-ndjson image_paths are relative ("./CV-Bench/img/..."), and the zip extracts under data_dir
-into SpatialScore_benchmark/ -> absolute image path = data_dir/SpatialScore_benchmark/<rel>.
-
-Scoring: shell out to evaluate_results.py (incl. LLM-judge). A pinned copy is vendored
-         verbatim at benchmarks/scorers/spatialscore/ (evaluate_results.py + utils/util.py)
-         so scoring is self-contained; SS_SCORER overrides it. Needs vllm + util.py's
-         torch/torchvision/matplotlib in the active env (see README).
-"""
-
 from __future__ import annotations
 
 import json
@@ -135,8 +120,8 @@ class SpatialScoreAdapter(BenchmarkAdapter):
         return str((self.data_dir / IMAGES_SUBDIR / rel).resolve())
 
     # one raw row -> one ms-swift row
-    def to_messages(self, row: dict[str, Any]) -> dict[str, Any] | None:
-        
+    def to_messages(self, row: dict[str, Any], model=None) -> dict[str, Any] | None:  # model-agnostic prompt; model unused
+
         image_paths = row.get("image_paths") or []
         if isinstance(image_paths, str):
             image_paths = [image_paths]
@@ -224,7 +209,7 @@ class SpatialScoreAdapter(BenchmarkAdapter):
             json.dump(entries, f, ensure_ascii=False, indent=2)   # JSON array (evaluate_results.py also accepts ndjson)
         print(f"[spatialscore reshape] {len(entries)} rows -> {out}")  # trace: how many rows were written and where
 
-    def score(self, in_dir: Path) -> dict[str, Any]:
+    def score(self, in_dir: Path, **opts: Any) -> dict[str, Any]:
         import os                                                   # stdlib; local import keeps the module top minimal
         import sys                                                  # reuse the active env's python interpreter
         import subprocess                                           # to run the external scorer

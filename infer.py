@@ -1,38 +1,3 @@
-#!/usr/bin/env python
-"""infer.py — inference runner (ms-swift).
-
-Runs in the inference env, driving the INFERENCE half of the pipeline. For each
-(benchmark, model):
-  1) adapter.preprocess()   — ensure the model-agnostic ms-swift jsonl exists (idempotent)
-  2) resolve model path     — HF repo id / local dir / repo-id+subfolder (SFT ckpts)
-  3) infer_main()           — run over the jsonl IN-PROCESS (no CLI/subprocess), writing
-                              the preds jsonl to preds_path(model)
-  4) adapter.mark_done()    — write done.flag with the expected sample count
-
-Inference calls ms-swift as a LIBRARY: `swift.pipelines.infer_main(InferArguments(...))`,
-in-process — no subprocess is spawned.
-
-Per-model settings from models.yaml are injected here (NOT in the adapter, which stays
-model-agnostic): min/max_pixels (SpatialScore test_qwen protocol) via MIN_PIXELS/MAX_PIXELS
-env + max_pixels arg, enable_thinking, backend via infer_backend.
-`remove_unused_columns=False` keeps our id/meta columns in the preds (reshape needs them).
-
-Multiple models can run in one invocation (`--models a,b,c`): they load into the same
-process one after another, and `_release_gpu()` frees the GPU between them (gc + vllm
-parallel-state destroy + empty_cache). That teardown is best-effort — vllm doesn't always
-fully release (CUDA context / graphs) — so if a multi-model run OOMs, fall back to one
-`infer.py` invocation per model (a fresh process is the only guaranteed reclaim).
-
-HF cache: repo ids need `USE_HF=1` (else ms-swift hits ModelScope) and, if your cache
-isn't in the default location, `HF_HOME` (see README). infer.py sets USE_HF if unset.
-
-Usage:
-    conda activate <swift env>
-    python infer.py --benchmarks spatialscore --models qwen3.5-27b,qwen3vl-8b
-    python infer.py --benchmarks all --models qwen3.5-27b
-    python infer.py --benchmarks all --models all      # every benchmark × every model in models.yaml
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -44,12 +9,10 @@ from benchmarks import base  # importing the package registers all adapters
 
 # ── resolve a model to a concrete path swift can load ────────────────────────
 def resolve_model_path(model: base.Model) -> str:
-    """HF repo id / local dir pass through; repo-id + subfolder is downloaded to a local dir."""
     if not model.subfolder:
         return model.path                                     # repo id (USE_HF resolves) or absolute local path
-    # subfolder lives inside an HF repo (e.g. SFT ckpts under haoningwu/SpatialScore) ->
-    # fetch just that subfolder and hand swift the concrete checkpoint dir.
-    from huggingface_hub import snapshot_download             # lazy (the inference env has it)
+    
+    from huggingface_hub import snapshot_download             
     root = snapshot_download(model.path, allow_patterns=[f"{model.subfolder}/*"])
     ckpt = Path(root) / model.subfolder
     if not (ckpt / "config.json").exists():
@@ -59,15 +22,6 @@ def resolve_model_path(model: base.Model) -> str:
 
 # ── best-effort GPU release between in-process models ────────────────────────
 def _release_gpu() -> None:
-    """Free GPU memory after an infer_main() call so the next model can load.
-
-    Running several models in one process means there's no per-model subprocess whose
-    exit reclaims the GPU, so we do it by hand: drop refs, collect, tear down vllm's
-    parallel state, and empty the torch cache. Best-effort — vllm can still retain some
-    memory (CUDA context / graphs); if a multi-model run OOMs anyway, split it into one
-    `infer.py` invocation per model. Imports are lazy + guarded so this is a no-op when
-    torch/vllm aren't the active stack.
-    """
     import gc
 
     gc.collect()
@@ -92,19 +46,15 @@ def _release_gpu() -> None:
 
 # ── run inference for one (adapter, model) ───────────────────────────────────
 def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens: int) -> None:
-    val = adapter.preprocess()                                # check if the jsonl file is in format for inference
+    val = adapter.preprocess(model)                           # ensure the input jsonl (per-model when the bench bakes a model-specific prompt)
     preds = adapter.preds_path(model)
     preds.parent.mkdir(parents=True, exist_ok=True)
-    if preds.exists():                                        # start clean so the line count reflects this run
+    if preds.exists():                                        
         preds.unlink()
 
     model_path = resolve_model_path(model)
 
-    # min/max_pixels are Qwen-VL smart_resize bounds (test_qwen protocol) read from the
-    # environment by the template at inference time — no InferArguments field for min, so
-    # env is the channel for both. We're in-process, so mutate os.environ (restored in the
-    # finally below) instead of handing a copied env to a child.
-    os.environ.setdefault("USE_HF", "1")                     # HF hub/cache, not ModelScope
+    os.environ.setdefault("USE_HF", "1")                     # HF hub/cache
     saved_env = {k: os.environ.get(k) for k in ("MIN_PIXELS", "MAX_PIXELS")}
     if model.min_pixels is not None:
         os.environ["MIN_PIXELS"] = str(model.min_pixels)
@@ -116,10 +66,10 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
         infer_backend=model.backend,                         # vllm | pt
         val_dataset=[str(val)],
         result_path=str(preds),
-        remove_unused_columns=False,                         # ★ keep id/meta columns for reshape/scoring
+        remove_unused_columns=False,                         # keep id/meta columns for reshape/scoring
         max_new_tokens=max_new_tokens,
         temperature=0.0,                                     # greedy (matches test_qwen)
-        use_hf=True,                                         # HF hub/cache, not ModelScope
+        use_hf=True,                                         # HF hub/cache
         vllm_max_num_seqs=128,                               # 256->128: cap concurrent seqs -> lower host-RAM peak
         write_batch_size=200,                                # 1000->200: smaller per-shard decode -> lower host-RAM peak
     )

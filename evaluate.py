@@ -1,23 +1,3 @@
-#!/usr/bin/env python
-"""evaluate.py — scoring orchestrator.
-
-Drives the SCORING half of the pipeline. For each (benchmark, model):
-  1) is_complete(model)          — gate: only score cleanly-finished inference
-  2) reshape(preds -> results)   — swift preds jsonl -> the scorer's input schema
-  3) score(results) -> metrics   — bench-specific scoring (may shell out)
-  4) write metrics.json          — persisted under results_dir(model)
-
-★ Activate a scoring env YOURSELF before running (see README.md)
-  This script runs scoring in whatever conda env is currently active — it does not
-  switch or check envs. Each benchmark needs certain deps (README lists them); make
-  sure the active env has them before running.
-
-Usage:
-    conda activate <an env with the scorer's deps>
-    python evaluate.py --benchmarks spatialscore --models qwen3.5-27b,qwen3vl-8b
-    python evaluate.py --benchmarks all --models all      # every benchmark × every scored model
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -49,13 +29,15 @@ def print_summary(bench: str, tag: str, metrics: dict) -> None:
 
 
 # ── reshape + score for one (adapter, model), in the current env ─────────────
-def score_one(adapter: base.BenchmarkAdapter, model: base.Model) -> dict:
+def score_one(adapter: base.BenchmarkAdapter, model: base.Model, **opts) -> dict:
     preds = adapter.preds_path(model)                        # swift infer output for this (model, bench)
     results = adapter.results_dir(model)                     # where reshape/score write their artifacts
     results.mkdir(parents=True, exist_ok=True)               # ensure it exists (idempotent)
 
     adapter.reshape(preds, results)                          # swift preds -> scorer input (e.g. all_results.json)
-    metrics = adapter.score(results)                         # bench-specific scoring -> metrics dict
+    metrics = adapter.score(results, model=model, **opts)    # bench-specific scoring -> metrics dict
+                                                             # (model: lets a bench auto-pick per-model options, e.g.
+                                                             #  refspatial_expand's parse_function; others ignore it)
 
     (results / "metrics.json").write_text(                   # persist the metrics next to the artifacts
         json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -69,7 +51,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Score benchmark predictions (activate an env with the scorer deps; see README).")
     ap.add_argument("--benchmarks", help="comma-separated bench names, or 'all' for every bench")
     ap.add_argument("--models", help="comma-separated model tags from models.yaml, or 'all' for every model")
+    ap.add_argument("--parse-function", dest="parse_function", default=None,
+                    help="refspatial_expand: point parser(s) to score with "
+                         "(normalized|absolute|xml|json|qwen1000). OMIT -> auto best-of per model "
+                         "(model's parser vs normalized, keep higher). Comma-separate to force "
+                         "several (first = primary). Other benches ignore it.")
     args = ap.parse_args()
+
+    # USER-supplied scoring options forwarded to adapter.score(**opts). Only pass keys the
+    # user set, so each bench falls back to its own default for anything unspecified.
+    score_opts = {k: v for k, v in (("parse_function", args.parse_function),) if v is not None}
 
     names = args.benchmarks.split(",") if args.benchmarks else None
     adapters = base.resolve(names)                            # selected adapters (or error if none specified)
@@ -85,7 +76,7 @@ def main() -> int:
                 print(f"[evaluate] skip {adapter.name}/{model.tag}: inference not complete")
                 continue
             try:
-                score_one(adapter, model)                    # reshape + score in the current env
+                score_one(adapter, model, **score_opts)      # reshape + score in the current env
             except Exception as e:
                 print(f"[evaluate] FAIL {adapter.name}/{model.tag}: {type(e).__name__}: {e}")
                 failures.append(f"{adapter.name}/{model.tag}")

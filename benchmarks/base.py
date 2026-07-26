@@ -1,22 +1,3 @@
-"""
-benchmarks/base.py
-────────────────────────────────────────────────────────────────────────
-Shared foundation for POST_CRISP benchmark adapters.
-
-★ This file is also imported in env2 (the scoring env), so only stdlib is imported
-  at the top. Heavy deps (datasets / torch / vllm, ...) are lazy-imported inside
-  each adapter's methods.
-
-Contains:
-  - Model             : one entry from models.yaml (minimal info for inference)
-  - register / get_adapter / list_adapters / resolve : name -> adapter instance
-  - path/completion contract : cache / preds / results / done.flag / is_complete
-  - BenchmarkAdapter  : the 4 methods each bench implements, plus a shared preprocess()
-                        with fingerprint-based auto-invalidation. The input jsonl it
-                        builds is model-agnostic; per-model settings (pixels, thinking,
-                        backend) are applied later in infer.py from models.yaml.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -36,7 +17,7 @@ PREDS_DIR   = Path(os.environ.get("PREDS_DIR",   ROOT / "preds"))
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", ROOT / "results"))
 
 # Raw/preprocessed data lives under benchmarks/data/<name>/ (anchored to the real
-# folder, independent of cwd).
+# folder).
 # NOTE: kept under data/ to avoid a name clash with benchmarks/spatialscore.py (module).
 BENCH_DIR   = Path(__file__).resolve().parent
 DATA_DIR    = Path(os.environ.get("BENCH_DATA_DIR", BENCH_DIR / "data"))
@@ -80,7 +61,7 @@ def swift_record(
     }
 
 
-# ── Model registry entry ─────────────────────────────────────────────────────
+# ── Model registry entry; it loads from 'models.yaml' ─────────────────────────────────────────────────────
 @dataclass
 class Model:
     tag: str                                  # unique alias (used in paths/result folders), e.g. "qwen3.5-27b"
@@ -106,7 +87,6 @@ class Model:
 
 
 # ── models.yaml -> [Model] (shared by infer.py + evaluate.py) ────────────────
-# base.py lives in benchmarks/, so the repo-root models.yaml is one level up.
 MODELS_YAML = Path(os.environ.get("MODELS_YAML", Path(__file__).resolve().parent.parent / "models.yaml"))
 
 
@@ -169,25 +149,32 @@ class BenchmarkAdapter(ABC):
     """
 
     name: str = ""                # unique name (@register key). must be set in the subclass.
+    # When True, to_messages bakes a model-specific prompt (branches on the Model), so
+    # preprocess writes a per-model jsonl (<name>__<tag>.jsonl) instead of the shared one.
+    # Default False -> the input jsonl is model-agnostic and reused across all models.
+    MODEL_SPECIFIC_PROMPT: bool = False
     # Note: scoring runs in whatever conda env is active when evaluate.py is invoked.
     # The adapter does NOT hardcode an env name; each bench's scoring deps are documented
     # in the README — activate an env that has them before scoring.
 
-    # ── Implemented by each bench (the only place things diverge) ────────────
+    # ── Implemented by each bench ────────────
     @abstractmethod
     def load_raw(self) -> list[dict[str, Any]]:
         """Load raw data as a list of dicts. (called only in env1 -> heavy imports go inside)"""
 
     @abstractmethod
-    def to_messages(self, row: dict[str, Any]) -> dict[str, Any] | None:
+    def to_messages(self, row: dict[str, Any], model: "Model | None" = None) -> dict[str, Any] | None:
         """
-        One raw row -> one ms-swift jsonl row. (model-agnostic)
+        One raw row -> one ms-swift jsonl row.
           - build messages(+ <image>) / images(absolute paths) + inject the prompt
           - carry scoring meta (id / gt / sub_task) as extra keys (--remove_unused_columns false)
           - return None to drop this sample (preprocess filters it out; e.g. skip video)
-        NOTE: per-model settings like enable_thinking / max_pixels do NOT go here.
-          infer.py handles them at inference time via models.yaml -> swift infer flags
-          (the input jsonl is model-agnostic).
+        `model` is passed only so a bench can branch the PROMPT per model (e.g. an official
+          per-model grounding prompt); set MODEL_SPECIFIC_PROMPT=True when you use it. Most
+          benches ignore it and stay model-agnostic.
+        NOTE: per-model INFERENCE settings (enable_thinking / max_pixels / backend) do NOT
+          go here — infer.py applies them via models.yaml -> swift infer flags. Only prompt
+          TEXT that legitimately differs per model belongs here.
         """
 
     @abstractmethod
@@ -195,12 +182,14 @@ class BenchmarkAdapter(ABC):
         """Prediction output (preds jsonl) -> reshape into this bench's scorer schema and write to out_dir."""
 
     @abstractmethod
-    def score(self, in_dir: Path) -> dict[str, Any]:
+    def score(self, in_dir: Path, **opts: Any) -> dict[str, Any]:
         """
         Score -> return a dict of metrics. (called by evaluate.py; runs in whatever conda
         env is active — activate one with this bench's scoring deps, see README)
         Shell out if there is an official harness (e.g. SpatialScore evaluate_results.py),
         otherwise use a custom metric (e.g. RoboRefer IoU).
+        `**opts` are USER-supplied scoring options forwarded from evaluate.py's CLI (e.g.
+          refspatial_expand's parse_function). Most benches ignore them.
         """
 
     # ── Data preparation (called by data_preparation.py) ─────────────────────
@@ -216,24 +205,35 @@ class BenchmarkAdapter(ABC):
         """
         raise NotImplementedError(f"{self.name}: ensure_data() not implemented")
 
-    def preprocess(self) -> Path:
+    def preprocess(self, model: "Model | None" = None) -> Path:
         """
-        raw -> to_messages -> write ms-swift jsonl to data_dir/<name>.jsonl. (model-agnostic)
+        raw -> to_messages -> write the ms-swift jsonl under data_dir.
 
-        Store the fingerprint (md5) of the processed recs in a sidecar (.<name>.jsonl.sha).
+        Store the fingerprint (md5) of the processed recs in a sidecar (.<stem>.jsonl.sha).
         If data/prompts change, the fingerprint changes and it auto-regenerates ->
         no manual cache clearing / --force needed.
-        No per-model settings here (the input jsonl is model-agnostic); infer.py handles
-        those via swift flags at inference time.
+
+        Model handling:
+          - MODEL_SPECIFIC_PROMPT=False (default): the prompt is model-agnostic, so one
+            shared <name>.jsonl is built once and reused across every model (`model` unused).
+          - MODEL_SPECIFIC_PROMPT=True: to_messages bakes a per-model prompt, so we write a
+            model-scoped <name>__<tag>.jsonl. This keeps each model's fingerprint separate
+            (no regeneration thrashing when alternating models in one infer run).
+        Per-model INFERENCE settings (pixels / thinking / backend) are NOT applied here;
+        infer.py injects them as swift flags at inference time.
         """
         raw = self.load_raw()
-        recs = [rec for r in raw if (rec := self.to_messages(r)) is not None]
+        recs = [rec for r in raw if (rec := self.to_messages(r, model)) is not None]
         skipped = len(raw) - len(recs)
         blob = json.dumps(recs, sort_keys=True, ensure_ascii=False).encode("utf-8")
         fp = hashlib.md5(blob).hexdigest()
 
-        out = self.data_dir / f"{self.name}.jsonl"
-        sha = self.data_dir / f".{self.name}.jsonl.sha"
+        if self.MODEL_SPECIFIC_PROMPT and model is not None:
+            stem = f"{self.name}__{model.tag}"                  # per-model jsonl: prompt varies by model
+        else:
+            stem = self.name                                   # shared, model-agnostic jsonl
+        out = self.data_dir / f"{stem}.jsonl"
+        sha = self.data_dir / f".{stem}.jsonl.sha"
         if out.exists() and sha.exists() and sha.read_text().strip() == fp:
             print(f"[preprocess skip] {out}  ({len(recs)} samples, fp={fp[:12]})")
             return out

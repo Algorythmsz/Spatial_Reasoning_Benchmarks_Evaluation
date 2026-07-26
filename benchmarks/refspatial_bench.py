@@ -12,13 +12,13 @@ from tqdm import tqdm
 
 from .base import BenchmarkAdapter, register, swift_record
 
-HF_REPO = "JingkunAn/RefSpatial-Expand-Bench"
-SUBSETS = ("Location", "Placement")  # each subset has question.json / image/ / mask/
+HF_REPO = "BAAI/RefSpatial-Bench"
+SUBSETS = ("Location", "Placement", "Unseen")  # each subset has question.json / image/ / mask/
 
 
 @register
-class RefSpatialExpandAdapter(BenchmarkAdapter):
-    name = "refspatial_expand"
+class RefSpatialBenchAdapter(BenchmarkAdapter):
+    name = "refspatial_bench"
 
     MODEL_SPECIFIC_PROMPT = True
 
@@ -29,17 +29,17 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
         root = self.data_dir
         root.mkdir(parents=True, exist_ok=True)
         if all((root / s / "question.json").exists() for s in SUBSETS):
-            print(f"[refspatial_expand] already present: {root}")
+            print(f"[refspatial_bench] already present: {root}")
             return
 
-        print("[refspatial_expand] downloading Location/ + Placement/ (question.json, image/, mask/) ...")
+        print("[refspatial_bench] downloading Location/ + Placement/ + Unseen/ (question.json, image/, mask/) ...")
         snapshot_download(
             HF_REPO,
             repo_type="dataset",
             local_dir=root,
             allow_patterns=[f"{s}/**" for s in SUBSETS],
         )
-        print(f"[refspatial_expand] ready: {root}")
+        print(f"[refspatial_bench] ready: {root}")
 
     def load_raw(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -47,7 +47,7 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
             qjson = self.data_dir / subset / "question.json"
             if not qjson.exists():
                 raise FileNotFoundError(
-                    f"{qjson} not found — run `python data_preparation.py refspatial_expand` first."
+                    f"{qjson} not found — run `python data_preparation.py refspatial_bench` first."
                 )
             with open(qjson, encoding="utf-8") as f:
                 for item in json.load(f):
@@ -59,7 +59,7 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
         return str((self.data_dir / subset / rel).resolve())
 
     def _prompt_for(self, row: dict[str, Any], model) -> str:
-        # Port of the official RefSpatial-Expand-Bench get_prompt(), branch-for-branch.
+        # Port of the official RefSpatial-Bench get_prompt(), branch-for-branch.
         # The official keys on the model NAME; our Model exposes tag + path, so we match
         # the same family substrings against "<tag> <path>" (e.g. "qwen3vl-32b
         # Qwen/Qwen3-VL-32B-Instruct"). Order mirrors the official if/elif chain.
@@ -114,7 +114,7 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
 
                 entries.append({
                     "id":        p.get("id", meta.get("id")),  # our uid "<subset>-<id>"
-                    "subset":    meta.get("subset"),           # Location | Placement (aggregation group)
+                    "subset":    meta.get("subset"),           # Location | Placement | Unseen (aggregation group)
                     "object":    meta.get("object"),           # target description (provenance)
                     "category":  meta.get("category"),         # aggregation group
                     "step":      meta.get("step"),             # reasoning steps (aggregation group)
@@ -126,7 +126,7 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
         out = out_dir / "all_results.json"
         with open(out, "w", encoding="utf-8") as f:
             json.dump(entries, f, ensure_ascii=False, indent=2)
-        print(f"[refspatial_expand reshape] {len(entries)} rows -> {out}")
+        print(f"[refspatial_bench reshape] {len(entries)} rows -> {out}")
 
 
     @staticmethod
@@ -135,7 +135,7 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
         pattern = r"\(([-+]?\d+\.?\d*(?:,\s*[-+]?\d+\.?\d*)*?)\)"
         matches = re.findall(pattern, text)
         points = []
-        
+
         for match in matches:
             vector = [float(num) if "." in num else int(num) for num in match.split(",")]
             if len(vector) == 2:                               # single point
@@ -225,10 +225,10 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
     @staticmethod
     def _parser_for_model(model) -> str:
         # Auto parser when --parse-function is OMITTED: mirrors the official main()'s per-model
-        # dispatch (keyed on tag+path substrings), but Qwen -> qwen1000 because our Expand-Bench
-        # JSON prompt makes Qwen emit point_2d, which the original's `absolute`/text2pts cannot
-        # read. Order mirrors the official if/elif chain. The user can still force any parser
-        # via --parse-function (that overrides this).
+        # dispatch (keyed on tag+path substrings), but Qwen -> qwen1000 because our JSON prompt
+        # makes Qwen emit point_2d, which the original's `absolute`/text2pts cannot read. Order
+        # mirrors the official if/elif chain. The user can still force any parser via
+        # --parse-function (that overrides this).
         name = f"{getattr(model, 'tag', '')} {getattr(model, 'path', '')}".lower() if model is not None else ""
         if "molmo" in name:
             return "xml"
@@ -274,18 +274,17 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
             auto = self._parser_for_model(model)
             names = [auto] if auto == "normalized" else [auto, "normalized"]
             pick_best = True
-            print(f"[refspatial_expand score] auto: scoring {names} for model="
+            print(f"[refspatial_bench score] auto: scoring {names} for model="
                   f"{getattr(model, 'tag', None)!r}, keeping the higher overall; --parse-function overrides")
         else:
             # EXPLICIT: user forces the parser(s); first one is primary (no best-of).
             names = [p.strip().lower() for p in parse_function.split(",") if p.strip()]
             pick_best = False
             if not names:
-                raise SystemExit(f"refspatial_expand --parse-function is empty; choose one of {sorted(PARSERS)}")
+                raise SystemExit(f"refspatial_bench --parse-function is empty; choose one of {sorted(PARSERS)}")
         for n in names:
             if n not in PARSERS:
                 raise SystemExit(f"parse_function={n!r} unknown; choose one of {sorted(PARSERS)}")
-
 
         acc_all: dict[str, list[float]] = {n: [] for n in names}
         by_subset = {n: defaultdict(list) for n in names}
@@ -303,7 +302,7 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
                 continue
 
             mask = np.array(Image.open(mask_path)) / 255.0
-            
+
             if mask.ndim == 3:
                 mask = mask[:, :, 0]
             mask = (mask > 0).astype(np.uint8)
@@ -339,7 +338,7 @@ class RefSpatialExpandAdapter(BenchmarkAdapter):
         for answer in answers:                                 # backward-compat per-question field
             answer["accuracy"] = answer.get(f"accuracy_{primary}")
 
-        print("[refspatial_expand score] "
+        print("[refspatial_bench score] "
               + "  ".join(f"{n}={(float(np.mean(acc_all[n])) if acc_all[n] else 0.0):.4f}" for n in names)
               + f"  (primary={primary}, n={len(acc_all[primary])}, missing_mask={missing})")
 
