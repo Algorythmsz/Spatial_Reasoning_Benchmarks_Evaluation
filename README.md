@@ -9,15 +9,15 @@ in three separate steps:
 | 2. infer | `infer.py` | inference env | `swift infer` each model over that jsonl → predictions + a `done.flag` |
 | 3. score | `evaluate.py` | inference env (scoring env for SpatialScore) | predictions → run the scorer → `metrics.json` |
 - 2 environments are needed: the inference env, plus a scoring env for SpatialScore's LLM judge.
-- **Benchmarks:** `spatialscore`, `multihopspatial`, `refspatial_expand` (in `benchmarks/`).
-  *(all three are wired end-to-end.)*
+- **Benchmarks:** `spatialscore`, `multihopspatial`, `refspatial_bench`, `refspatial_expand` (in `benchmarks/`).
+  *(all four are wired end-to-end.)*
 - **Models:** listed in `models.yaml` — edit that file to add/remove models.
 
 ---
 
 ## 🧩 Benchmarks
 
-Three spatial-reasoning benchmarks, each with an interactive **viewer** to browse its samples (image + question + ground truth). Scoring for all three is described under [Scoring](#-scoring).
+Four spatial-reasoning benchmarks, each with an interactive **viewer** to browse its samples (image + question + ground truth). Scoring for all of them is described under [Scoring](#-scoring).
 
 ### `spatialscore` — [🔎 Viewer](https://algorythmsz.github.io/SpatialScore_Viewer/)
 
@@ -34,14 +34,24 @@ Three spatial-reasoning benchmarks, each with an interactive **viewer** to brows
 - **Output:** an answer line + a box, e.g. `Answer: (a) chair` and `bbox_2d` in **normalized `[0,1]` xyxy**.
 - **Metrics:** **MCQ accuracy**, **Acc@50IoU** (MCQ-correct AND bbox IoU ≥ 0.5), **Avg IoU** (mean IoU over MCQ-correct samples).
 - **Source:** [etri-vilab/MultihopSpatial](https://huggingface.co/datasets/etri-vilab/MultihopSpatial) (4500 questions).
+- ⚠️ **The prompt and the scorer here are ours, not the authors'** — no official evaluation code is
+  public for this benchmark. See [MultihopSpatial](#multihopspatial--our-own-scorer-no-upstream-code).
+
+### `refspatial_bench` — [🔎 Viewer](https://algorythmsz.github.io/RefSpatial-Expand-bench_Viewer/)
+
+- **Task:** referring spatial grounding — given an object + a spatial instruction, **POINT** at the target location(s). Three subsets: `Location`, `Placement`, `Unseen`.
+- **Input:** one RGB image + a referring prompt (the grounding prompt is chosen per model at inference — see the [parse-function table](#refspatial-point-parser---parse-function)).
+- **Output:** one or more points as text, e.g. `[(0.25, 0.40)]` (Qwen emits a 0–1000 space and/or JSON `point_2d`).
+- **Metrics:** fraction of predicted points that land inside the ground-truth mask, aggregated overall + by subset / step / category.
+- **Source:** [BAAI/RefSpatial-Bench](https://huggingface.co/datasets/BAAI/RefSpatial-Bench) (the benchmark released with [RoboRefer](https://github.com/Zhoues/RoboRefer)).
 
 ### `refspatial_expand` — [🔎 Viewer](https://algorythmsz.github.io/RefSpatial-Expand-bench_Viewer/)
 
-- **Task:** referring spatial grounding — given an object + a spatial instruction, **POINT** at the target location(s). Two subsets: `Location` and `Placement`.
-- **Input:** one RGB image + a referring prompt (the grounding prompt is chosen per model at inference — see the [parse-function table](#refspatial_expand-point-parser---parse-function)).
+- **Task:** same point-in-mask grounding task as `refspatial_bench`, on the expanded release. Two subsets: `Location` (241) and `Placement` (200); no `Unseen`.
+- **Input:** one RGB image + a referring prompt (the grounding prompt is chosen per model at inference — see the [parse-function table](#refspatial-point-parser---parse-function)).
 - **Output:** one or more points as text, e.g. `[(0.25, 0.40)]` (Qwen emits a 0–1000 space and/or JSON `point_2d`).
 - **Metrics:** fraction of predicted points that land inside the ground-truth mask, aggregated overall + by subset / step / category.
-- **Source:** [JingkunAn/RefSpatial-Expand-Bench](https://huggingface.co/datasets/JingkunAn/RefSpatial-Expand-Bench).
+- **Source:** [JingkunAn/RefSpatial-Expand-Bench](https://huggingface.co/datasets/JingkunAn/RefSpatial-Expand-Bench). No published baselines for this release.
 
 ---
 
@@ -158,11 +168,11 @@ own job in parallel.
 `results/<model-tag>/<benchmark>/` (`all_results.json`, `summary_report.json`, `metrics.json`).
 
 ```bash
-conda activate <scoring-env>        # SpatialScore; use the inference env for the other two
+conda activate <scoring-env>        # SpatialScore; use the inference env for the others
 python evaluate.py --benchmarks spatialscore --models qwen3vl-4b,qwen3.5-4b
 ```
 
-SpatialScore's scorer lives at `benchmarks/scorers/spatialscore/evaluate_results.py` — a local copy of the official SpatialScore code, vendored here so scoring is self-contained.
+SpatialScore's scorer lives at `benchmarks/scorers/spatialscore/evaluate_results.py` — a **byte-identical copy** of the official SpatialScore code, vendored here so scoring is self-contained. Upstream's MIT `LICENSE` sits next to it. Treat these files as read-only: to score with a modified scorer, point `SS_SCORER` at your own checkout instead of patching the vendored copy.
 
 Optional:
 
@@ -171,12 +181,14 @@ export SS_NO_LLM=1     # rule-only: skip the Stage-2 judge LLM (no GPU)
 ```
 Other optional overrides: `SS_LLM_PATH` (judge, default `openai/gpt-oss-20b`), `SS_SCORER` (a different scorer checkout), `SS_TP_SIZE` / `SS_GPU_MEM` (judge vllm knobs).
 
-### `refspatial_expand`: point parser (`--parse-function`)
+### RefSpatial: point parser (`--parse-function`)
 
-`refspatial_expand` is a point-in-mask task: the model POINTs at a target and the scorer counts how many predicted points land inside the GT mask. **Different models write coordinates in different formats**, so the scorer must know how to read them. `--parse-function` is **optional**:
+Applies to both `refspatial_bench` and `refspatial_expand`. These are point-in-mask tasks: the model POINTs at a target and the scorer counts how many predicted points land inside the GT mask. **Different models write coordinates in different formats**, so the scorer must know how to read them.
 
-- **Omit it → auto best-of.** The scorer scores with the model's parser (per-model dispatch ported from the official evaluator: `molmo`→`xml`, `gemini`→`json`, `robobrain`→`absolute`, `qwen`→`qwen1000`, else `normalized`) **and** with `normalized` (`text2pts`), then **reports whichever scores higher overall**. This is robust to a wrong auto-pick or a model that emits an unexpected format. Both candidates' full results are persisted (`metrics_<name>.json` / `summary_report_<name>.json`).
-- **Pass it → force** that parser for every model (the first of a comma list is primary, no best-of).
+**Exactly one parser produces the reported score, and it is fixed before scoring starts** — never picked by comparing which one scored higher. `--parse-function` is **optional**:
+
+- **Omit it → auto-pick from the model.** Per-model dispatch ported from the official evaluator: `molmo`→`xml`, `gemini`→`json`, `robobrain`→`absolute`, `qwen`→`qwen1000`, else `normalized`. The choice depends only on the model tag/path, not on the predictions.
+- **Pass it → force** that parser for every model (the first of a comma list is primary).
 
 | `--parse-function` | how it reads coords | official RefSpatial models that use it |
 |---|---|---|
@@ -193,7 +205,7 @@ conda activate <inference-env>
 python evaluate.py --benchmarks refspatial_expand --models qwen3vl-4b --parse-function qwen1000
 ```
 
-**Score under several parsers at once** — comma-separate them. The **first is primary** (feeds the canonical `metrics.json` / the leaderboard / the per-question `accuracy` field). Every parser you list also gets its **own standalone file pair**, name-suffixed — `metrics_<name>.json` and `summary_report_<name>.json` — plus a per-question `accuracy_<name>` in `all_results.json`, so you can compare with no re-run:
+**Score under several parsers at once** — comma-separate them. This is a *diagnostic* view, not a way to shop for the best number: the **first one you list is primary** and is the only one that feeds the canonical `metrics.json` / the leaderboard / the per-question `accuracy` field, regardless of how the others score. Every parser you list also gets its **own standalone file pair**, name-suffixed — `metrics_<name>.json` and `summary_report_<name>.json` — plus a per-question `accuracy_<name>` in `all_results.json`, so you can compare with no re-run:
 
 ```bash
 python evaluate.py --benchmarks refspatial_expand --models qwen3vl-4b --parse-function qwen1000,normalized
@@ -203,14 +215,39 @@ python evaluate.py --benchmarks refspatial_expand --models qwen3vl-4b --parse-fu
 
 (A single `--parse-function` writes only the plain `metrics.json` / `summary_report.json`, exactly as before — no suffixed files.)
 
-### `multihopspatial`: scoring knobs (optional)
+### `multihopspatial` — our own scorer (no upstream code)
 
-`multihopspatial` is an MCQ + bounding-box task, scored rule-based in the inference env (no judge). Metrics: **MCQ accuracy**, **Acc@50IoU** (MCQ-correct AND bbox IoU ≥ threshold), **Avg IoU** (mean IoU over MCQ-correct samples). Optional env knobs:
+`multihopspatial` is an MCQ + bounding-box task, scored rule-based in the inference env (no judge). Metrics: **MCQ accuracy**, **Acc@50IoU** (MCQ-correct AND bbox IoU ≥ threshold), **Avg IoU** (mean IoU over MCQ-correct samples).
+
+> ⚠️ **No official evaluation code is public for this benchmark.** The authors' harness
+> (`github.com/youngwanLEE/msrbench`, referenced from the dataset card) is not accessible, and there
+> is no MultihopSpatial task in VLMEvalKit's `main`. So everything below the dataset itself is
+> **ours**, written from the dataset card and the paper's metric definitions:
+>
+> - the `SYSTEM_PROMPT` in `benchmarks/multihopspatial.py`, which pins the answer + `bbox_2d` output
+>   contract and asks for **normalized `[0,1]`** coordinates (the dataset's own question text only
+>   says *"And provide the bounding box coordinate of the region related to your answer"*);
+> - the answer-letter and bbox parsing, including the coord-scale (`/1000`, pixel) and `xywh→xyxy`
+>   rescue heuristics;
+> - the aggregation into overall / per-hop / per-view.
+>
+> Only the **data interpretation** is anchored to upstream: GT `bbox` is `[x, y, w, h]` in pixels and
+> `image_resolution` is `"WxH"`, both per the dataset card, converted to normalized xyxy before IoU.
+>
+> **Consequence:** these numbers are internally consistent and fine for comparing models *within this
+> repo*, but they are **not** a reproduction of the paper's protocol and should not be reported as
+> matching it. If the official harness is released, re-validate against it before publishing.
+
+Optional env knobs:
 
 ```bash
 export MHS_IOU_THR=0.5   # IoU threshold for Acc@IoU (default 0.5)
-export MHS_STRICT=1      # reject coord-scale / xywh rescue heuristics (stricter bbox parsing)
+export MHS_STRICT=1      # reject the coord-scale / xywh rescue heuristics (stricter bbox parsing)
 ```
+
+`MHS_STRICT=1` is the closest thing to a "no heuristics" run: it drops any bbox that only parsed
+because of a rescue heuristic, instead of scoring the rescued value. Worth reporting alongside the
+default when the heuristic rate (`coord_heuristic_rate` in `summary_report.json`) is non-trivial.
 
 ---
 
@@ -295,7 +332,7 @@ python make_table.py --bench multihopspatial
 
 ## 🖼️ Full example from scratch (qwen3vl-4b on RefSpatial-Expand)
 
-RefSpatial-Expand also scores in the **inference env** (point-in-mask, PIL + numpy — no judge). Scoring **auto-picks the point parser per model** (Qwen → `qwen1000`); pass `--parse-function` only to override (see [point parser](#refspatial_expand-point-parser---parse-function)).
+RefSpatial-Expand also scores in the **inference env** (point-in-mask, PIL + numpy — no judge). Scoring **auto-picks one point parser from the model** (Qwen → `qwen1000`); pass `--parse-function` only to override (see [point parser](#refspatial-point-parser---parse-function)). Swap `refspatial_expand` → `refspatial_bench` below for the original three-subset benchmark; every step is the same.
 
 ```bash
 # a) build the inference env (once, ever — see Step a). No scoring env needed here.
@@ -314,7 +351,8 @@ python data_preparation.py refspatial_expand
 # 2) infer  (per-model grounding prompt is baked in automatically; one model per run)
 python infer.py --benchmarks refspatial_expand --models qwen3vl-4b
 
-# 3) score  (--parse-function REQUIRED; qwen1000 for Qwen. Add ,normalized to also see the official reading)
+# 3) score  (--parse-function optional: omitting it auto-picks qwen1000 for Qwen anyway.
+#            Pass it to be explicit; add ,normalized to also dump the official reading side by side.)
 python evaluate.py --benchmarks refspatial_expand --models qwen3vl-4b --parse-function qwen1000
 cat results/qwen3vl-4b/refspatial_expand/summary_report.json   # overall + by subset/step/category
 

@@ -241,10 +241,11 @@ class RefSpatialBenchAdapter(BenchmarkAdapter):
         return "normalized"                                    # RoboPoint/Claude/GPT4O/RoboRefer + default
 
     # Score: fraction of predicted points that land inside the GT mask (RoboRefer metric).
-    # parse_function: which point parser(s) to score with. OMIT -> AUTO best-of: score the
-    #   model's parser (_parser_for_model, evaluate.py passes `model`) AND text2pts/normalized,
-    #   report whichever scores higher overall. PASS -> force it for every model (comma-separate
-    #   for several; first = primary, no best-of). See PARSERS below. **opts: ignored.
+    # parse_function: which point parser(s) to score with. OMIT -> AUTO: the model's parser
+    #   (_parser_for_model, evaluate.py passes `model`), fixed BEFORE scoring. PASS -> force it
+    #   for every model. Either way the reported score comes from ONE parser chosen up front,
+    #   never from comparing outcomes — comma-separating several only adds side-by-side files
+    #   (first = primary). See PARSERS below. **opts: ignored.
     def score(self, in_dir: Path, parse_function: str | None = None, model=None, **opts: Any) -> dict[str, Any]:
 
         results_path = in_dir / "all_results.json"
@@ -267,19 +268,15 @@ class RefSpatialBenchAdapter(BenchmarkAdapter):
             "qwen1000":   self._norm1000_pts,
         }
         if parse_function is None:
-            # AUTO: score with the model's parser AND text2pts (normalized), then report
-            # whichever scores HIGHER overall (pick_best). Guards against a wrong auto-pick or
-            # a model that emits an unexpected format. (If the model's parser already IS
-            # normalized, there's nothing to compare -> single parser.)
-            auto = self._parser_for_model(model)
-            names = [auto] if auto == "normalized" else [auto, "normalized"]
-            pick_best = True
-            print(f"[refspatial_bench score] auto: scoring {names} for model="
-                  f"{getattr(model, 'tag', None)!r}, keeping the higher overall; --parse-function overrides")
+            # AUTO: ONE parser, decided from the model alone (official main()'s dispatch, with
+            # Qwen -> qwen1000). Fixed before any scoring happens, so the reported number never
+            # depends on which parser happened to score higher on this test set.
+            names = [self._parser_for_model(model)]
+            print(f"[refspatial_bench score] auto: parse_function={names[0]!r} for model="
+                  f"{getattr(model, 'tag', None)!r}; --parse-function overrides")
         else:
-            # EXPLICIT: user forces the parser(s); first one is primary (no best-of).
+            # EXPLICIT: user forces the parser(s); first one is primary.
             names = [p.strip().lower() for p in parse_function.split(",") if p.strip()]
-            pick_best = False
             if not names:
                 raise SystemExit(f"refspatial_bench --parse-function is empty; choose one of {sorted(PARSERS)}")
         for n in names:
@@ -331,10 +328,9 @@ class RefSpatialBenchAdapter(BenchmarkAdapter):
                 by_step[n][step].append(acc)
                 by_category[n][category].append(acc)
 
-        # primary parser: best-of overall in AUTO mode; else the first the user listed.
-        def _overall(n: str) -> float:
-            return float(np.mean(acc_all[n])) if acc_all[n] else 0.0
-        primary = max(names, key=_overall) if pick_best else names[0]
+        # primary parser: always the first name — the auto-picked one, or the first the user
+        # listed. Never chosen by comparing scores.
+        primary = names[0]
         for answer in answers:                                 # backward-compat per-question field
             answer["accuracy"] = answer.get(f"accuracy_{primary}")
 
