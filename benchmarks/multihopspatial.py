@@ -22,6 +22,10 @@ same single-pass, greedy, deterministic path as every other one.
 
 Generation settings still follow upstream, via INFER_DEFAULTS: image resolution unpinned
 (upstream never pins it) and max_new_tokens 8192 (not this repo's usual 512).
+
+QWEN ONLY. Upstream ships one evaluator per model family and they are not interchangeable
+(different prompt, different coordinate convention, different parser). We vendored the Qwen
+one; `_require_qwen` refuses anything else rather than scoring it wrongly in silence.
 """
 from __future__ import annotations
 
@@ -41,6 +45,38 @@ def upstream():
     from .vendor.multihopspatial import benchmark_qwen_vllm
 
     return benchmark_qwen_vllm
+
+
+def _require_qwen(model) -> None:
+    """Upstream ships ONE evaluator per model family, and they are not interchangeable.
+
+    We vendored `benchmark_qwen_vllm.py`, which is Qwen-specific in three places:
+
+      build_prompt     asks for a bare `Bounding Box: [x1, y1, x2, y2]` with no range
+                       instruction (Qwen answers in its native 0-1000 space)
+      parse_response   rescues that with a per-box `any(v > 1) -> /1000` rule
+      calculate_iou    reads the result as x1,y1,x2,y2
+
+    Upstream's benchmark_gpt.py / benchmark_claude.py instead ask for
+    `{"bbox_2d": [...]}` in an explicit 0-1 range and do NO rescaling, and
+    benchmark_gemini.py uses [y1, x1, y2, x2] order. Scoring a GPT-style model with this
+    parser would silently divide its 0-1 coordinates by 1000 whenever one exceeds 1, and a
+    Gemini-style model would come out axis-swapped — wrong numbers, no error.
+
+    So refuse non-Qwen models here rather than at IoU time. Fires during preprocess, before
+    any GPU work. To add another family: vendor the matching upstream script next to this
+    one and dispatch on the model, the way refspatial_base.py::_prompt_for already does.
+    """
+    if model is None:                                          # data_preparation.py: no model yet
+        return
+    if "qwen" not in f"{model.tag} {model.path}".lower():
+        raise SystemExit(
+            f"multihopspatial: {model.tag!r} is not a Qwen model, and the vendored evaluator "
+            f"(benchmark_qwen_vllm.py) is Qwen-specific — its prompt omits the 0-1 range "
+            f"instruction and its parser applies a /1000 rescue. Scoring {model.tag!r} with it "
+            f"would produce wrong numbers silently. Vendor upstream's benchmark_gpt.py / "
+            f"benchmark_gemini.py / benchmark_claude.py and dispatch per model instead. See "
+            f"benchmarks/vendor/multihopspatial/README.md.")
 
 
 @register
@@ -79,7 +115,13 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
         return str((self.data_dir / IMAGES_SUBDIR / image_path).resolve())
 
     def to_messages(self, row: dict[str, Any], model=None) -> dict[str, Any]:
-        """Upstream's build_prompt verbatim: one user turn, question then format block."""
+        """Upstream's build_prompt verbatim: one user turn, question then format block.
+
+        The prompt is the same for every Qwen model, so this bench keeps the shared jsonl
+        (MODEL_SPECIFIC_PROMPT stays False); `model` is used only to reject families the
+        vendored evaluator can't score.
+        """
+        _require_qwen(model)
         images = [self._abs(row["image_path"])] if row.get("image_path") else []
         content = "<image>" * len(images) + upstream().build_prompt(row.get("question", ""))
         meta = {

@@ -16,6 +16,30 @@ them unchanged:
 | `compute_score` | MCQ correctness |
 | `calculate_full_metrics` | Acc / Acc@50IoU / avg IoU, and their denominators |
 
+## Qwen only — the evaluators are not interchangeable
+
+Upstream ships one script per model family, and the differences are not cosmetic:
+
+| script | prompt asks for | parser |
+|---|---|---|
+| `benchmark_qwen*.py` *(vendored here)* | bare `Bounding Box: [x1, y1, x2, y2]`, **no range instruction** | per-box `any(v > 1) -> /1000` rescue (Qwen answers in its native 0-1000 space) |
+| `benchmark_gpt.py`, `benchmark_claude.py` | `{"bbox_2d": [...]}`, **"Use NORMALIZED (0.0 to 1.0)"** | none — the 0-1 instruction is trusted |
+| `benchmark_gemini.py` | `{"bbox_2d": [y1, x1, y2, x2]}` | axis order swapped |
+
+Note the prompt printed in the paper (`bbox_2d` + "Use NORMALIZED coordinates (0.0 to 1.0)"
++ an example) is the **GPT/Claude** one, not Qwen's. Reading the paper alone would give you
+the wrong prompt for a Qwen run.
+
+Scoring a GPT-style model with this parser would divide its 0-1 coordinates by 1000 the
+moment one exceeded 1, and a Gemini-style model would come out axis-swapped — wrong numbers,
+no error. `benchmarks/multihopspatial.py::_require_qwen` therefore refuses non-Qwen models
+during preprocess, before any GPU time is spent. To add a family, vendor its script here and
+dispatch per model, the way `refspatial_base.py::_prompt_for` already does.
+
+`compute_score` and the metric definitions (Acc / Acc@50IoU / avg IoU over MCQ-correct) are
+identical across all five scripts; only `benchmark_qwen_vllm.py` factors them into
+`calculate_full_metrics`, which is why that is the copy we vendored.
+
 ## What is NOT reproduced: the retry loop
 
 Upstream re-generates any response whose answer or bbox fails to parse, up to 3 rounds
