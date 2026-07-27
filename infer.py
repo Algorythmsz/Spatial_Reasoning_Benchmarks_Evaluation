@@ -86,7 +86,7 @@ def _release_gpu() -> None:
 
 
 # ── run inference for one (adapter, model) ───────────────────────────────────
-def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens: int,
+def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens: int | None,
               **infer_opts) -> None:
     val = adapter.preprocess(model)                           # ensure the input jsonl (per-model when the bench bakes a model-specific prompt)
     preds = adapter.preds_path(model)
@@ -101,15 +101,18 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
     restore_env = lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
                            for k, v in saved_env.items()]
 
-    # CUSTOM_INFER: the bench owns its whole inference step. Needed when the protocol has
-    # to inspect a response and RE-GENERATE it (MultihopSpatial's retry rounds), which the
-    # args-driven infer_main path below cannot express. The adapter owns its generation
-    # settings too, so infer.py's defaults deliberately do NOT apply here — including the
-    # pixel bounds, which are CLEARED so the model's own default resolution is used (the
-    # official MultihopSpatial evaluator never pins them; pinning would change image-token
-    # counts and stop the run being a reproduction). ms-swift reads these from the env, so
-    # leaving a stale value set would silently apply it.
-    if getattr(adapter, "CUSTOM_INFER", False):
+    # UPSTREAM_OWNS_LOOP: a vendored official evaluator drives generation itself, so the
+    # adapter runs the whole inference step and infer.py just gets out of the way. This is
+    # not "our code, but custom" — it is the case where the generation loop lives in code we
+    # must not edit: MultihopSpatial's evaluator inspects each response and RE-GENERATES the
+    # invalid ones, which the args-driven infer_main path below cannot express at all.
+    #
+    # Generation settings come from upstream too, so infer.py's defaults deliberately do NOT
+    # apply — including the pixel bounds, which are CLEARED here so the model's own default
+    # resolution is used (upstream never pins them; pinning changes image-token counts and
+    # stops the run being a reproduction). ms-swift reads those from the env, so leaving a
+    # stale value set would silently apply it.
+    if getattr(adapter, "UPSTREAM_OWNS_LOOP", False):
         os.environ.pop("MIN_PIXELS", None)
         os.environ.pop("MAX_PIXELS", None)
         _guard_nccl_p2p()                                    # must precede any vllm import
@@ -133,7 +136,7 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
         val_dataset=[str(val)],
         result_path=str(preds),
         remove_unused_columns=False,                         # keep id/meta columns for reshape/scoring
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=max_new_tokens or 512,                 # None -> this path's default
         temperature=0.0,                                     # greedy (matches test_qwen)
         use_hf=True,                                         # HF hub/cache
         vllm_max_num_seqs=128,                               # 256->128: cap concurrent seqs -> lower host-RAM peak
@@ -181,9 +184,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Run inference (ms-swift) over models.yaml.")
     ap.add_argument("--benchmarks", help="comma-separated bench names, or 'all' for every bench")
     ap.add_argument("--models", help="comma-separated model tags from models.yaml, or 'all' for every model")
-    ap.add_argument("--max-new-tokens", type=int, default=512, help="generation budget (default 512)")
-    # CUSTOM_INFER knobs — forwarded to adapter.run_inference(); benches on the infer_main
-    # path ignore them entirely. Today only multihopspatial (the vendored official evaluator).
+    ap.add_argument("--max-new-tokens", type=int, default=None,
+                    help="generation budget. Omit to use each benchmark's own default "
+                         "(512 on the infer_main path, upstream's 8192 for multihopspatial).")
+    # UPSTREAM_OWNS_LOOP knobs — forwarded to adapter.run_inference(); benches on the
+    # infer_main path ignore them. Today only multihopspatial (the vendored official evaluator).
     ap.add_argument("--greedy", action="store_true",
                     help="force temperature=0; deterministic, but disables retry rounds")
     ap.add_argument("--temperature", type=float, default=None,

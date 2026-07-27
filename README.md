@@ -159,7 +159,7 @@ conda activate <inference-env>
 python infer.py --benchmarks spatialscore --models qwen3vl-4b,qwen3.5-4b
 ```
 
-Options: `--benchmarks all` (every benchmark), `--models all` (every model in `models.yaml`), `--max-new-tokens N` (default 512).
+Options: `--benchmarks all` (every benchmark), `--models all` (every model in `models.yaml`), `--max-new-tokens N` (omit to use each benchmark's own default — 512 normally, upstream's 8192 for multihopspatial).
 
 Passing multiple models in one call loads them sequentially in the same process, which can
 cause Out-of-Memory (OOM) — vllm doesn't always fully release the GPU between models. Prefer **one model per run**. To run several at once, launch each as its

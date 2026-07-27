@@ -72,10 +72,11 @@ def _local_model_dir(model_path: str) -> str:
 @register
 class MultihopSpatialAdapter(BenchmarkAdapter):
     name = "multihopspatial"
-    # infer.py hands the whole inference step to run_inference() below, because upstream's
-    # protocol inspects each response and RE-GENERATES the invalid ones — a loop the
-    # args-driven infer_main(InferArguments(...)) path cannot express.
-    CUSTOM_INFER = True
+    # The vendored official evaluator owns the generation loop: it inspects each response
+    # and RE-GENERATES the invalid ones (up to 3 rounds), which the args-driven
+    # infer_main(InferArguments(...)) path cannot express. So infer.py hands the whole
+    # inference step to run_inference() below. See infer.py's UPSTREAM_OWNS_LOOP branch.
+    UPSTREAM_OWNS_LOOP = True
 
     # ── data ────────────────────────────────────────────────────────────────
     def ensure_data(self) -> None:
@@ -124,7 +125,7 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
             "multihopspatial prompts come from the vendored official evaluator "
             "(benchmarks/scorers/multihopspatial/benchmark_qwen_vllm.py::build_prompt).")
 
-    # ── inference (called by infer.py because CUSTOM_INFER) ─────────────────
+    # ── inference (called by infer.py because UPSTREAM_OWNS_LOOP) ───────────
     def run_inference(self, model, model_path: str, max_new_tokens: int | None = None,
                       *, greedy: bool = False, temperature: float | None = None,
                       max_retries: int | None = None, seed: int | None = None,
