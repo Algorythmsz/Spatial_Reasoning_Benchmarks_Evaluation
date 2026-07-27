@@ -1,9 +1,15 @@
 # Vendored: official MultihopSpatial evaluator
 
-`benchmark_qwen_vllm.py` is a **byte-identical copy** of `eval/benchmark_qwen_vllm.py` from
-[youngwanLEE/multihopspatial](https://github.com/youngwanLEE/multihopspatial) @ `ab711b8`.
-Upstream's Apache-2.0 `LICENSE` sits next to it. **Treat it as read-only** — every part of
-this protocol that we previously guessed at turned out to differ from the real thing.
+**byte-identical copies** of `eval/*.py` from
+[youngwanLEE/multihopspatial](https://github.com/youngwanLEE/multihopspatial) @ `ab711b8`,
+one per model family. Upstream's Apache-2.0 `LICENSE` sits next to them. **Treat them as
+read-only** — every part of this protocol that we previously guessed at turned out to differ
+from the real thing.
+
+    benchmark_qwen_vllm.py    benchmark_gpt.py    benchmark_claude.py    benchmark_gemini.py
+
+(Upstream also has `benchmark_qwen.py`, a plain-transformers variant of the Qwen script. Not
+vendored: our inference backend is vLLM, so `benchmark_qwen_vllm.py` is the matching one.)
 
 `benchmarks/multihopspatial.py` imports the pieces that define what a score means and uses
 them unchanged:
@@ -16,7 +22,7 @@ them unchanged:
 | `compute_score` | MCQ correctness |
 | `calculate_full_metrics` | Acc / Acc@50IoU / avg IoU, and their denominators |
 
-## Qwen only — the evaluators are not interchangeable
+## The evaluators are not interchangeable — routing
 
 Upstream ships one script per model family, and the differences are not cosmetic:
 
@@ -30,15 +36,24 @@ Note the prompt printed in the paper (`bbox_2d` + "Use NORMALIZED coordinates (0
 + an example) is the **GPT/Claude** one, not Qwen's. Reading the paper alone would give you
 the wrong prompt for a Qwen run.
 
-Scoring a GPT-style model with this parser would divide its 0-1 coordinates by 1000 the
+Scoring a GPT-style model with the Qwen parser would divide its 0-1 coordinates by 1000 the
 moment one exceeded 1, and a Gemini-style model would come out axis-swapped — wrong numbers,
-no error. `benchmarks/multihopspatial.py::_require_qwen` therefore refuses non-Qwen models
-during preprocess, before any GPU time is spent. To add a family, vendor its script here and
-dispatch per model, the way `refspatial_base.py::_prompt_for` already does.
+no error. So `benchmarks/multihopspatial.py` routes:
+
+- `family_for(model)` matches the tag+path against `gemini | claude | gpt | qwen`; anything
+  else is **refused**, not guessed at
+- the resolved family is recorded in each sample's `meta`, so `reshape()` parses a response
+  back with the same module that wrote its prompt
+- `upstream(family)` imports **lazily** — each script pulls in its own SDK (vllm / openai /
+  google-genai / anthropic) and only the family in use has to be installed
+- `MODEL_SPECIFIC_PROMPT = True`, since the prompt now varies per model
+
+To add a family: vendor its script here and add it to `FAMILY_MODULES`.
 
 `compute_score` and the metric definitions (Acc / Acc@50IoU / avg IoU over MCQ-correct) are
-identical across all five scripts; only `benchmark_qwen_vllm.py` factors them into
-`calculate_full_metrics`, which is why that is the copy we vendored.
+identical across all the scripts; only `benchmark_qwen_vllm.py` factors them into
+`calculate_full_metrics`, so that one computes the metrics whichever family generated the
+predictions.
 
 ## What is NOT reproduced: the retry loop
 

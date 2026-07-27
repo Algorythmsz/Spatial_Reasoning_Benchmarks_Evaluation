@@ -1,8 +1,8 @@
 """MultihopSpatial — the authors' evaluator, minus its retry loop.
 
-`benchmarks/vendor/multihopspatial/benchmark_qwen_vllm.py` is a byte-identical copy of the
-official harness. Everything that decides what a score MEANS is imported from it and used
-unchanged:
+`benchmarks/vendor/multihopspatial/` holds byte-identical copies of the official harness —
+one per model family. Everything that decides what a score MEANS is imported from them and
+used unchanged:
 
     build_prompt            the exact prompt text and layout
     parse_response          answer letter + bbox, including the /1000 scale rule
@@ -23,9 +23,10 @@ same single-pass, greedy, deterministic path as every other one.
 Generation settings still follow upstream, via INFER_DEFAULTS: image resolution unpinned
 (upstream never pins it) and max_new_tokens 8192 (not this repo's usual 512).
 
-QWEN ONLY. Upstream ships one evaluator per model family and they are not interchangeable
-(different prompt, different coordinate convention, different parser). We vendored the Qwen
-one; `_require_qwen` refuses anything else rather than scoring it wrongly in silence.
+Upstream ships one evaluator per model family and they are not interchangeable — different
+prompt, coordinate convention and parser. All four are vendored; the family is resolved from
+the model, recorded per sample, and used again when parsing the response back. An
+unrecognised family is refused rather than guessed at.
 """
 from __future__ import annotations
 
@@ -40,48 +41,71 @@ TEST_JSON = "data/multihop_test_4500.json"
 IMAGES_SUBDIR = "data/images"
 
 
-def upstream():
-    """The vendored official evaluator. Imported lazily — the module pulls in vllm."""
-    from .vendor.multihopspatial import benchmark_qwen_vllm
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-family routing
+#
+# Upstream ships one evaluator per model family and they are NOT interchangeable — the
+# prompt, the coordinate convention and the parser all differ:
+#
+#   qwen    bare `Bounding Box: [x1, y1, x2, y2]`, no range instruction; the parser
+#           rescues Qwen's native 0-1000 space with a per-box `any(v > 1) -> /1000`
+#   gpt     `{"bbox_2d": [...]}` with "Use NORMALIZED (0.0 to 1.0)"; NO rescaling
+#   claude  same as gpt
+#   gemini  `{"bbox_2d": [y1, x1, y2, x2]}` — axis order swapped
+#
+# Pick the wrong one and nothing errors; the numbers are just wrong. So the family is
+# resolved from the model, recorded in each sample's meta, and used again at scoring time.
+# Same shape as refspatial_base.py::_prompt_for.
+# ─────────────────────────────────────────────────────────────────────────────
+FAMILY_MODULES = {                                             # family -> vendored module
+    "qwen": "benchmark_qwen_vllm",                             # vLLM variant: our inference backend
+    "gpt": "benchmark_gpt",
+    "claude": "benchmark_claude",
+    "gemini": "benchmark_gemini",
+}
+DEFAULT_FAMILY = "qwen"                                        # every model in models.yaml today
 
-    return benchmark_qwen_vllm
+
+def family_for(model) -> str:
+    """Model -> evaluator family. Matched on tag+path, like upstream matches on model name."""
+    if model is None:                                          # data_preparation.py has no model;
+        return DEFAULT_FAMILY                                  # infer.py rebuilds per model anyway
+    name = f"{model.tag} {model.path}".lower()
+    for family in ("gemini", "claude", "gpt", "qwen"):         # most specific first
+        if family in name:
+            return family
+    raise SystemExit(
+        f"multihopspatial: cannot tell which official evaluator fits {model.tag!r} "
+        f"({model.path}). Upstream has one per family ({', '.join(FAMILY_MODULES)}) and they "
+        f"use different prompts and coordinate conventions, so guessing would silently "
+        f"produce wrong numbers. Add the family to FAMILY_MODULES in "
+        f"benchmarks/multihopspatial.py, vendoring its script if it isn't there yet.")
 
 
-def _require_qwen(model) -> None:
-    """Upstream ships ONE evaluator per model family, and they are not interchangeable.
+def upstream(family: str = DEFAULT_FAMILY):
+    """The vendored evaluator for one family. Imported lazily: each pulls in its own SDK
+    (vllm / openai / google-genai / anthropic) and only the one in use needs to be installed."""
+    import importlib
 
-    We vendored `benchmark_qwen_vllm.py`, which is Qwen-specific in three places:
-
-      build_prompt     asks for a bare `Bounding Box: [x1, y1, x2, y2]` with no range
-                       instruction (Qwen answers in its native 0-1000 space)
-      parse_response   rescues that with a per-box `any(v > 1) -> /1000` rule
-      calculate_iou    reads the result as x1,y1,x2,y2
-
-    Upstream's benchmark_gpt.py / benchmark_claude.py instead ask for
-    `{"bbox_2d": [...]}` in an explicit 0-1 range and do NO rescaling, and
-    benchmark_gemini.py uses [y1, x1, y2, x2] order. Scoring a GPT-style model with this
-    parser would silently divide its 0-1 coordinates by 1000 whenever one exceeds 1, and a
-    Gemini-style model would come out axis-swapped — wrong numbers, no error.
-
-    So refuse non-Qwen models here rather than at IoU time. Fires during preprocess, before
-    any GPU work. To add another family: vendor the matching upstream script next to this
-    one and dispatch on the model, the way refspatial_base.py::_prompt_for already does.
-    """
-    if model is None:                                          # data_preparation.py: no model yet
-        return
-    if "qwen" not in f"{model.tag} {model.path}".lower():
+    module = FAMILY_MODULES.get(family)
+    if module is None:
+        raise SystemExit(f"multihopspatial: unknown evaluator family {family!r}; "
+                         f"known: {sorted(FAMILY_MODULES)}")
+    try:
+        return importlib.import_module(f"{__package__}.vendor.multihopspatial.{module}")
+    except ImportError as e:                                   # that family's SDK isn't installed
         raise SystemExit(
-            f"multihopspatial: {model.tag!r} is not a Qwen model, and the vendored evaluator "
-            f"(benchmark_qwen_vllm.py) is Qwen-specific — its prompt omits the 0-1 range "
-            f"instruction and its parser applies a /1000 rescue. Scoring {model.tag!r} with it "
-            f"would produce wrong numbers silently. Vendor upstream's benchmark_gpt.py / "
-            f"benchmark_gemini.py / benchmark_claude.py and dispatch per model instead. See "
-            f"benchmarks/vendor/multihopspatial/README.md.")
+            f"multihopspatial: the {family!r} evaluator ({module}.py) needs a package that "
+            f"isn't installed in this env — {e}. Install it, or score a family whose "
+            f"dependencies are present.") from e
 
 
 @register
 class MultihopSpatialAdapter(BenchmarkAdapter):
     name = "multihopspatial"
+    # The prompt differs per model family (see FAMILY_MODULES), so each model gets its own
+    # input jsonl instead of one shared file.
+    MODEL_SPECIFIC_PROMPT = True
     # Upstream leaves image resolution at the model default and generates up to 8192 tokens;
     # this repo's defaults (SpatialScore pixel bounds, 512 tokens) would change image-token
     # counts and truncation behaviour, and the numbers would stop being comparable.
@@ -115,15 +139,10 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
         return str((self.data_dir / IMAGES_SUBDIR / image_path).resolve())
 
     def to_messages(self, row: dict[str, Any], model=None) -> dict[str, Any]:
-        """Upstream's build_prompt verbatim: one user turn, question then format block.
-
-        The prompt is the same for every Qwen model, so this bench keeps the shared jsonl
-        (MODEL_SPECIFIC_PROMPT stays False); `model` is used only to reject families the
-        vendored evaluator can't score.
-        """
-        _require_qwen(model)
+        """The matching family's build_prompt, verbatim."""
+        family = family_for(model)
         images = [self._abs(row["image_path"])] if row.get("image_path") else []
-        content = "<image>" * len(images) + upstream().build_prompt(row.get("question", ""))
+        content = "<image>" * len(images) + upstream(family).build_prompt(row.get("question", ""))
         meta = {
             "id": row.get("id"),
             "answer": row.get("answer"),                       # "(c) frame of the reed picture"
@@ -131,6 +150,7 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
             "hop": row.get("hop"),                             # 1hop | 2hop | 3hop
             "view": row.get("view"),                           # ego | exo
             "image_path": row.get("image_path"),               # to read the image size at scoring
+            "family": family,                                  # which evaluator parses this back
         }
         return swift_record(row.get("id"), images=images, meta=meta,
                             messages=[{"role": "user", "content": content}])
@@ -140,12 +160,14 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
         """swift preds -> upstream's per-sample result shape.
 
         Runs upstream's own parse_response / calculate_iou / compute_score, so parsing and
-        IoU are exactly the official ones. Image size comes from PIL, as upstream does.
+        IoU are exactly the official ones — from the SAME family module that produced the
+        prompt, recorded per sample at to_messages time. Image size comes from PIL, as
+        upstream does.
         """
         from PIL import Image
 
-        up = upstream()
         out_dir.mkdir(parents=True, exist_ok=True)
+        cache: dict[str, Any] = {}                             # family -> module (import once)
         records: list[dict[str, Any]] = []
         with open(preds_path, encoding="utf-8") as f:
             for line in f:
@@ -159,6 +181,8 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
                     raw = next((m.get("content", "") for m in reversed(msgs)
                                 if m.get("role") == "assistant"), "")
 
+                family = meta.get("family", DEFAULT_FAMILY)
+                up = cache.setdefault(family, upstream(family))
                 prediction, pred_bbox = up.parse_response(raw or "")
                 with Image.open(self._abs(meta["image_path"])) as img:
                     w, h = img.size
@@ -172,6 +196,7 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
                     "pred_bbox": pred_bbox,
                     "iou": up.calculate_iou(meta.get("bbox"), pred_bbox, w, h),
                     "score": up.compute_score(prediction, meta.get("answer")),
+                    "family": family,
                     "raw_response": raw,
                 })
 
@@ -182,8 +207,12 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
 
     def score(self, in_dir: Path, **opts: Any) -> dict[str, Any]:
         """Metrics from upstream's calculate_full_metrics: overall, per hop, per view, and
-        per hop x view cell (the paper's published layout)."""
-        up = upstream()
+        per hop x view cell (the paper's published layout).
+
+        The metric definitions are identical in all four vendored evaluators; only
+        benchmark_qwen_vllm.py factors them into a function, so that one is used regardless
+        of which family generated the predictions."""
+        up = upstream(DEFAULT_FAMILY)
         results_path = in_dir / "all_results.json"
         if not results_path.exists():
             raise FileNotFoundError(f"{results_path} not found — run reshape first.")

@@ -197,10 +197,18 @@ them before the point-in-mask check. It is selected automatically for Qwen model
 ### multihopspatial — the official evaluator, minus its retry loop ###
 
 The authors' harness is public, so the protocol is theirs.
-[`benchmarks/vendor/multihopspatial/`](benchmarks/vendor/multihopspatial/) holds a
-byte-identical copy of `eval/benchmark_qwen_vllm.py`, and the adapter imports the five
-functions that decide what a score means — `build_prompt`, `parse_response`,
-`calculate_iou`, `compute_score`, `calculate_full_metrics` — and uses them unchanged.
+[`benchmarks/vendor/multihopspatial/`](benchmarks/vendor/multihopspatial/) holds
+byte-identical copies of `eval/*.py`, and the adapter imports the functions that decide what
+a score means — `build_prompt`, `parse_response`, `calculate_iou`, `compute_score`,
+`calculate_full_metrics` — and uses them unchanged.
+
+Upstream ships **one evaluator per model family and they are not interchangeable**: Qwen gets
+a bare `Bounding Box: [x1, y1, x2, y2]` and a `/1000` rescue for its native 0–1000 output,
+GPT/Claude get `bbox_2d` in an explicit 0–1 range with no rescaling, and Gemini uses
+`[y1, x1, y2, x2]`. Picking the wrong one produces wrong numbers with no error, so the family
+is resolved from the model, recorded per sample, and reused when parsing the response back.
+An unrecognised model is refused rather than guessed at. *(Note: the prompt printed in the
+paper is the GPT/Claude one, not Qwen's.)*
 
 **What we don't reproduce is the retry loop.** Upstream re-generates any response whose
 answer or bbox fails to parse, up to 3 rounds. Doing that means handing the generation loop
