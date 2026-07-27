@@ -248,45 +248,14 @@ python make_table.py --bench multihopspatial --breakdown task --metrics accuracy
 
 ---
 
-## ▶️ Run the whole thing with one script
-
-`run_pipeline.sh` chains the four steps above — prepare → infer → score → table — so you don't
-have to type them one by one. It's a convenience wrapper, not a required layer: it only calls the
-same `python …` commands documented above.
-
-```bash
-./run_pipeline.sh -m qwen3vl-4b -b multihopspatial
-```
-
-```bash
-# several models / benchmarks; SpatialScore needs the second env for its judge
-./run_pipeline.sh -m qwen3vl-4b,qwen3vl-8b -b spatialscore,refspatial_expand \
-                  --infer-env infer-env --score-env score-env
-```
-
-| flag | |
-|---|---|
-| `-m, --models` | comma-separated tags from `models.yaml`, or `all` *(required)* |
-| `-b, --benchmarks` | comma-separated benchmark names, or `all` *(required)* |
-| `--infer-env` / `--score-env` | conda envs to activate per step (default: whatever is active now; `--score-env` defaults to `--infer-env`) |
-| `--max-new-tokens N` | generation budget (default 512) |
-| `--skip-prepare` / `--skip-infer` / `--skip-score` / `--skip-table` | run only the parts you need |
-
-Two things it does deliberately, worth copying if you write your own driver:
+## 🧷 Notes when running several models
 
 - **One model per `infer.py` process.** vLLM doesn't reliably release the GPU between models
-  loaded in the same process, so a multi-model run can OOM midway. Scoring has no such problem
-  and gets all models in one call.
-- **Env switch only where it matters.** SpatialScore's scoring stage activates `--score-env`
-  (LLM judge); everything else stays in the inference env.
-
-Re-running is safe: preparation skips already-downloaded data, and `infer.py` skips
-(model, benchmark) pairs that already finished — so a crashed run resumes where it stopped.
-To re-score existing predictions after a scorer change, with no inference:
-
-```bash
-./run_pipeline.sh -m qwen3vl-4b -b multihopspatial --skip-prepare --skip-infer
-```
+  loaded in the same process, so passing several `--models` at once can OOM midway. Scoring has
+  no such problem and takes them all in one call.
+- **Re-running is safe.** Preparation skips already-downloaded data, and `infer.py` skips
+  (model, benchmark) pairs that already finished — a crashed run resumes where it stopped. To
+  re-score existing predictions after a scorer change, just run `evaluate.py` again.
 
 > `slurm/` holds the batch-job wrappers used on the cluster this was developed on. They call the
 > exact same entry points and are **not needed** to run anything here — ignore that directory
