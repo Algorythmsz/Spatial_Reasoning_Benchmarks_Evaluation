@@ -215,9 +215,9 @@ class SpatialScoreAdapter(BenchmarkAdapter):
         import subprocess                                           # to run the external scorer
 
         # Resolve the scorer script + its dir (cwd must be that dir so `import utils.util` works).
-        # Default: the copy vendored into this repo (benchmarks/scorers/spatialscore/); no machine
+        # Default: the copy vendored into this repo (benchmarks/vendor/spatialscore/); no machine
         # path is baked in. Override with SS_SCORER only to point at a different checkout.
-        vendored = Path(__file__).resolve().parent / "scorers" / "spatialscore" / "evaluate_results.py"
+        vendored = Path(__file__).resolve().parent / "vendor" / "spatialscore" / "evaluate_results.py"
         scorer = Path(os.environ.get("SS_SCORER", str(vendored))).resolve()  # env override else vendored
         if not scorer.exists():                                     # missing -> say exactly what's wrong
             raise FileNotFoundError(f"scorer not found: {scorer} (SS_SCORER override, or vendored copy missing)")

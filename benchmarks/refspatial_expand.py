@@ -6,7 +6,7 @@ prompt, the five coordinate parsers, and point-in-mask scoring.
 from __future__ import annotations
 
 from .base import register
-from .refspatial import RefSpatialBase
+from .refspatial_base import RefSpatialBase
 
 
 @register

@@ -178,7 +178,7 @@ python evaluate.py --benchmarks spatialscore --models qwen3vl-4b,qwen3.5-4b
 ```
 
 SpatialScore is scored by the official upstream scorer, vendored unmodified under
-`benchmarks/scorers/spatialscore/` (see the README there)
+`benchmarks/vendor/spatialscore/` (see the README there)
 
 Optional:
 
@@ -197,14 +197,14 @@ them before the point-in-mask check. It is selected automatically for Qwen model
 ### multihopspatial — the official evaluator, on ms-swift ###
 
 The authors' harness is public, so the whole protocol is theirs.
-[`benchmarks/scorers/multihopspatial/`](benchmarks/scorers/multihopspatial/) holds a
+[`benchmarks/vendor/multihopspatial/`](benchmarks/vendor/multihopspatial/) holds a
 byte-identical copy of `eval/benchmark_qwen_vllm.py`; prompt, retry rounds, answer/bbox
 parsing, coordinate scaling, IoU and the hop × view table all run upstream's code.
 
 The only thing we change is the inference backend. Upstream reaches vLLM through two
 module-level names, so `swift_backend.py` rebinds them to `swift.VllmEngine` /
 `swift.RequestConfig` rather than editing the file. See the
-[README there](benchmarks/scorers/multihopspatial/README.md).
+[README there](benchmarks/vendor/multihopspatial/README.md).
 
 **This benchmark's generation settings are upstream's, not the repo's** — deliberately, since
 matching them is the point:
@@ -390,6 +390,8 @@ results/<model-tag>/<name>/     all_results.json, summary_report.json, metrics.j
 table/<name>.csv                make_table.py --csv output (leaderboards)  [TABLE_DIR]
 sft/mhs-<base>-<tuner>/         train/train.py checkpoints
 ```
+
+`benchmarks/vendor/` holds byte-identical copies of the benchmarks' official code (SpatialScore's scorer, MultihopSpatial's whole evaluator) — read-only, each with its own README.
 
 Everything except `benchmarks/data/` (which follows `BENCH_DATA_DIR`) sits under
 `POST_CRISP_ROOT`, and each row is individually overridable via the env var in brackets

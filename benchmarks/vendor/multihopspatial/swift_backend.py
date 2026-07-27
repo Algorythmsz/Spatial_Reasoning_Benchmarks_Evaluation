@@ -197,7 +197,7 @@ def install() -> Any:
     import importlib
 
     upstream = importlib.import_module(
-        "benchmarks.scorers.multihopspatial.benchmark_qwen_vllm")
+        "benchmarks.vendor.multihopspatial.benchmark_qwen_vllm")
     upstream.LLM = LLM
     upstream.SamplingParams = SamplingParams
     return upstream

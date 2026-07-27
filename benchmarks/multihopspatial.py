@@ -1,7 +1,7 @@
 """MultihopSpatial — driven by the OFFICIAL evaluator, on ms-swift's inference engine.
 
 The authors published their harness (github.com/youngwanLEE/multihopspatial, eval/), so
-none of the protocol is ours any more. `benchmarks/scorers/multihopspatial/` holds a
+none of the protocol is ours any more. `benchmarks/vendor/multihopspatial/` holds a
 byte-identical copy of `eval/benchmark_qwen_vllm.py`; this adapter only:
 
   1. points it at the dataset we already downloaded,
@@ -47,7 +47,7 @@ OFFICIAL_DEFAULTS = {
 
 def load_upstream():
     """Import the vendored official evaluator with ms-swift wired in as its backend."""
-    from .scorers.multihopspatial import swift_backend
+    from .vendor.multihopspatial import swift_backend
 
     return swift_backend.install()
 
@@ -123,7 +123,7 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
     def to_messages(self, row, model=None):                    # unused; upstream owns the prompt
         raise NotImplementedError(
             "multihopspatial prompts come from the vendored official evaluator "
-            "(benchmarks/scorers/multihopspatial/benchmark_qwen_vllm.py::build_prompt).")
+            "(benchmarks/vendor/multihopspatial/benchmark_qwen_vllm.py::build_prompt).")
 
     # ── inference (called by infer.py because UPSTREAM_OWNS_LOOP) ───────────
     def run_inference(self, model, model_path: str, max_new_tokens: int | None = None,
@@ -131,7 +131,7 @@ class MultihopSpatialAdapter(BenchmarkAdapter):
                       max_retries: int | None = None, seed: int | None = None,
                       test_samples: int | None = None, **_: Any) -> int:
         """Run upstream's run_benchmark() and write the repo's preds files."""
-        from .scorers.multihopspatial import swift_backend
+        from .vendor.multihopspatial import swift_backend
 
         model_path = _local_model_dir(model_path)
         upstream = load_upstream()
