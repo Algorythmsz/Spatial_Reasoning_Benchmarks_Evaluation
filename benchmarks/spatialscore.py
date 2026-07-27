@@ -10,7 +10,7 @@ HF_REPO = "haoningwu/SpatialScore"
 NDJSON_NAME = "SpatialScore_benchmark.ndjson"
 ZIP_NAME = "SpatialScore_benchmark.zip"
 IMAGES_SUBDIR = "SpatialScore_benchmark"      
-SENTINEL = ".images_extracted"                # mark only when images are successfully unzipped
+SENTINEL = ".images_extracted"                
 
 
 @register
