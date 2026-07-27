@@ -1,22 +1,23 @@
 #!/usr/bin/env python
-"""Train/prepare_mhs_sft.py — build the MultihopSpatial SFT training set (ms-swift format).
+"""train/prepare_mhs_sft.py — build the MultihopSpatial SFT training set (ms-swift format).
 
 Trains on the DISJOINT train split (multihop_train_6791.json), NOT the eval set
 (multihop_test_4500.json) -> no leakage. Each record's assistant target is written in the
-EXACT format the multihopspatial scorer parses:
+EXACT format the official evaluator parses:
 
     Answer: (b) green round container
-    Bounding Box: {"bbox_2d": [x1, y1, x2, y2]}          # NORMALIZED xyxy in [0,1]
+    Bounding Box: [x1, y1, x2, y2]                       # NORMALIZED xyxy in [0,1]
 
 The train GT bbox is COCO-style [x, y, w, h] in PIXELS + an "image_resolution" (WxH), so we
-convert it to normalized xyxy here (the same frame the scorer/prompt use). Output is one
-ms-swift SFT record per line: {"messages": [system, user, assistant], "images": [abs_path]}.
+convert it to normalized xyxy here (the frame the evaluator scores in). Output is one
+ms-swift SFT record per line: {"messages": [user, assistant], "images": [abs_path]}.
 
-Reuses benchmarks.multihopspatial (SYSTEM_PROMPT / data_dir / _abs) so the SFT format tracks
-the eval harness. Run in the inference env (huggingface_hub); set BENCH_DATA_DIR to /data2.
+The PROMPT comes from the vendored official evaluator (build_prompt), so training inputs
+match evaluation inputs exactly — if upstream's prompt changes, this follows automatically.
+Run in the inference env (huggingface_hub); set BENCH_DATA_DIR to /data2.
 
 Usage:
-    BENCH_DATA_DIR=/data2/seungwon/post_crisp/data python Train/prepare_mhs_sft.py
+    BENCH_DATA_DIR=/data2/seungwon/post_crisp/data python train/prepare_mhs_sft.py
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root -> 
 
 from benchmarks.multihopspatial import (
     MultihopSpatialAdapter,
-    SYSTEM_PROMPT,
+    load_upstream,
     HF_REPO,
     IMAGES_SUBDIR,
 )
@@ -66,6 +67,7 @@ def main() -> int:
         snapshot_download(HF_REPO, repo_type="dataset", local_dir=str(root),
                           allow_patterns=[f"{IMAGES_SUBDIR}/*"])
 
+    build_prompt = load_upstream().build_prompt          # official prompt = eval-time prompt
     train = json.load(open(tj, encoding="utf-8"))
     out = root / OUT_NAME
     n = skipped = missing_img = 0
@@ -80,16 +82,16 @@ def main() -> int:
             except Exception:
                 skipped += 1
                 continue
-            image_abs = adapter._abs(img)
+            image_abs = str((adapter.image_root / img).resolve())
             if not Path(image_abs).exists():
                 missing_img += 1
                 continue
             target = (f"Answer: {ans}\n"
-                      f'Bounding Box: {{"bbox_2d": [{xyxy[0]}, {xyxy[1]}, {xyxy[2]}, {xyxy[3]}]}}')
+                      f"Bounding Box: [{xyxy[0]}, {xyxy[1]}, {xyxy[2]}, {xyxy[3]}]")
             rec = {
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": "<image>" + (row.get("question") or "")},
+                "messages": [                                  # upstream's prompt, verbatim
+                    {"role": "user",
+                     "content": "<image>" + build_prompt(row.get("question") or "")},
                     {"role": "assistant", "content": target},
                 ],
                 "images": [image_abs],
