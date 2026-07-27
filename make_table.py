@@ -38,8 +38,12 @@ def pct(x: float) -> str:
     return f"{x * 100:.2f}"
 
 
-def build_rows(scored: dict[str, dict], breakdown: str | None) -> tuple[list[str], list[list[str]]]:
-    """Header + rows. Always includes Overall; optionally a per-breakdown column set."""
+def build_rows(scored: dict[str, dict], breakdown: str | None,
+               metrics: list[str]) -> tuple[list[str], list[list[str]]]:
+    """Header + rows. Always includes Overall; optionally a per-breakdown column set.
+    Each group contributes one column per requested metric (a metric a scorer doesn't
+    emit renders as '-'), so e.g. --breakdown task --metrics accuracy,acc@50iou gives
+    MultihopSpatial's published Acc. / Acc@50 pairs per hop x view cell."""
     sub_cols: list[str] = []
     if breakdown:
         for m in scored.values():
@@ -47,14 +51,19 @@ def build_rows(scored: dict[str, dict], breakdown: str | None) -> tuple[list[str
                 if name not in sub_cols:
                     sub_cols.append(name)
 
-    header = ["model", "n", "overall"] + sub_cols
+    # one column per (group, metric); drop the metric suffix when only one is requested
+    label = (lambda group, _mt: group) if len(metrics) == 1 else (lambda group, mt: f"{group} {mt}")
+    header = ["model", "n"] + [label("overall", mt) for mt in metrics] \
+             + [label(name, mt) for name in sub_cols for mt in metrics]
+    cellval = lambda cell, mt: pct(cell[mt]) if isinstance(cell, dict) and mt in cell else "-"
+
     rows: list[list[str]] = []
     for tag, m in sorted(scored.items(), key=lambda kv: kv[1].get("overall", {}).get("accuracy", 0), reverse=True):
         overall = m.get("overall", {})
-        row = [tag, str(overall.get("count", "")), pct(overall.get("accuracy", 0.0))]
+        row = [tag, str(overall.get("count", ""))] + [cellval(overall, mt) for mt in metrics]
         for name in sub_cols:
             cell = m.get(breakdown, {}).get(name)
-            row.append(pct(cell["accuracy"]) if cell else "-")
+            row += [cellval(cell, mt) for mt in metrics]
         rows.append(row)
     return header, rows
 
@@ -75,8 +84,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bench", required=True, help="benchmark name (results/<tag>/<bench>/)")
     ap.add_argument("--breakdown", choices=BREAKDOWNS, help="add per-group columns (default: overall only)")
+    ap.add_argument("--metrics", default="accuracy",
+                    help="comma-separated metric keys to print per group (default: accuracy). "
+                         "multihopspatial cells also carry acc@50iou and avg_iou — e.g. "
+                         "`--breakdown task --metrics accuracy,acc@50iou` prints the published "
+                         "Acc./Acc@50 pairs per 3Hop-Ego ... 1Hop-Exo cell.")
     ap.add_argument("--csv", help="also write the table to this CSV path")
     args = ap.parse_args()
+    metrics = [m.strip() for m in args.metrics.split(",") if m.strip()] or ["accuracy"]
 
     scored, skipped = load_metrics(args.bench)
     if not scored:
@@ -85,8 +100,8 @@ def main() -> int:
             print(f"[table] present but unscored: {', '.join(skipped)}")
         return 1
 
-    header, rows = build_rows(scored, args.breakdown)
-    print(f"# {args.bench} — accuracy (%), {len(scored)} model(s) scored, sorted by overall\n")
+    header, rows = build_rows(scored, args.breakdown, metrics)
+    print(f"# {args.bench} — {', '.join(metrics)} (%), {len(scored)} model(s) scored, sorted by overall accuracy\n")
     print_table(header, rows)
     if skipped:
         print(f"\n[table] present but not scored ({len(skipped)}): {', '.join(skipped)}")
