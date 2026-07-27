@@ -34,9 +34,9 @@ Four spatial-reasoning benchmarks. Three of them have an interactive **viewer** 
 - **Output:** an answer line + a box, e.g. `Answer: (a) chair` and `Bounding Box: [x1, y1, x2, y2]`.
 - **Metrics:** **MCQ accuracy**, **Acc@50IoU** (MCQ-correct AND bbox IoU ≥ 0.5), **Avg IoU** (mean IoU over MCQ-correct samples).
 - **Source:** [etri-vilab/MultihopSpatial](https://huggingface.co/datasets/etri-vilab/MultihopSpatial) (4500 questions).
-- Runs the authors' own evaluator, vendored and driven on ms-swift — including its sampled
-  decoding and retry rounds, so **scores vary run to run**. See
-  [multihopspatial](#multihopspatial--the-official-evaluator-on-ms-swift).
+- Prompt, parsing, IoU and metrics all come from the authors' own evaluator, vendored; its
+  retry loop is the one part not reproduced. See
+  [multihopspatial](#multihopspatial--the-official-evaluator-minus-its-retry-loop).
 
 ### `refspatial_bench` — *(no viewer)*
 
@@ -194,32 +194,31 @@ correctly by that mapping. The official prompt asks for coordinates between 0 an
 answers in the 0–1000 space it was trained to emit for grounding, while the parser paired with Qwen reads those numbers as raw pixels.  So we added a parsing/normalizing function, `qwen1000`, that rescales
 them before the point-in-mask check. It is selected automatically for Qwen models.
 
-### multihopspatial — the official evaluator, on ms-swift ###
+### multihopspatial — the official evaluator, minus its retry loop ###
 
-The authors' harness is public, so the whole protocol is theirs.
+The authors' harness is public, so the protocol is theirs.
 [`benchmarks/vendor/multihopspatial/`](benchmarks/vendor/multihopspatial/) holds a
-byte-identical copy of `eval/benchmark_qwen_vllm.py`; prompt, retry rounds, answer/bbox
-parsing, coordinate scaling, IoU and the hop × view table all run upstream's code.
+byte-identical copy of `eval/benchmark_qwen_vllm.py`, and the adapter imports the five
+functions that decide what a score means — `build_prompt`, `parse_response`,
+`calculate_iou`, `compute_score`, `calculate_full_metrics` — and uses them unchanged.
 
-The only thing we change is the inference backend. Upstream reaches vLLM through two
-module-level names, so `swift_backend.py` rebinds them to `swift.VllmEngine` /
-`swift.RequestConfig` rather than editing the file. See the
-[README there](benchmarks/vendor/multihopspatial/README.md).
+**What we don't reproduce is the retry loop.** Upstream re-generates any response whose
+answer or bbox fails to parse, up to 3 rounds. Doing that means handing the generation loop
+to upstream's code, which needs a custom inference path, an engine shim, and sampled
+decoding (a retry at temperature 0 reproduces the same string) — a lot of machinery for a
+bound measured at 1.8% of responses (80/4500 on qwen3vl-4b). So inference runs this repo's
+normal single-pass, greedy, deterministic path, and **the numbers are a slight
+under-estimate versus the paper's protocol**: an unparseable response is scored as-is
+instead of retried. Say so when comparing to published numbers.
 
-**This benchmark's generation settings are upstream's, not the repo's** — deliberately, since
-matching them is the point:
+Two of upstream's generation settings are kept, because they change what the model sees
+rather than how it is scored (`INFER_DEFAULTS` on the adapter):
 
 | | multihopspatial | our other benches |
 |---|---|---|
 | `min/max_pixels` | **not set** (model default) | pinned to the SpatialScore protocol |
-| decoding | the checkpoint's `generation_config.json` (Qwen3-VL-4B: t=0.7) | greedy |
 | `max_new_tokens` | 8192 | 512 |
-| retry | up to 3 rounds if the answer or bbox won't parse | none |
 
-So **scores here vary run to run**, and retry-until-valid means a score is "best of ≤3
-attempts filtered by format validity", which flatters models with messy output. `--greedy`
-buys determinism back but turns the retry rounds off (a retry at temperature 0 reproduces
-the same string), and is then no longer the paper's protocol.
 ---
 
 ## 📊 Make a table for results
@@ -323,7 +322,7 @@ python make_table.py --bench spatialscore
 
 ## 🖼️ Full example from scratch (qwen3vl-4b on MultihopSpatial)
 
-MultihopSpatial runs the vendored **official evaluator** on ms-swift, entirely in the inference env (no judge, no scoring env). Inference and scoring both come from upstream's code — see [multihopspatial](#multihopspatial--the-official-evaluator-on-ms-swift).
+MultihopSpatial scores entirely in the **inference env** (no judge, no scoring env), using the vendored official evaluator's prompt, parser and metrics — see [multihopspatial](#multihopspatial--the-official-evaluator-minus-its-retry-loop).
 
 ```bash
 # a) build the inference env (once, ever — see Step a). No scoring env needed here.
@@ -339,8 +338,7 @@ export POST_CRISP_ROOT=<results-disk>/post_crisp                    # preds/resu
 # 1) prepare  (downloads etri-vilab/MultihopSpatial: 4500 questions + COCO-style images)
 python data_preparation.py multihopspatial
 
-# 2) infer  (upstream protocol: sampled decoding + up to 3 retry rounds. One model per run.
-#    --test-samples N for a smoke test; --greedy for determinism, which disables retries.)
+# 2) infer  (one model per run is safest)
 python infer.py --benchmarks multihopspatial --models qwen3vl-4b
 
 # 3) score  (same env; metrics come from upstream's calculate_full_metrics)

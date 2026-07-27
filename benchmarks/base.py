@@ -153,6 +153,13 @@ class BenchmarkAdapter(ABC):
     # preprocess writes a per-model jsonl (<name>__<tag>.jsonl) instead of the shared one.
     # Default False -> the input jsonl is model-agnostic and reused across all models.
     MODEL_SPECIFIC_PROMPT: bool = False
+    # Per-benchmark inference settings, applied by infer.py. Use when a benchmark's official
+    # protocol differs from this repo's defaults — the numbers only mean something if the
+    # generation settings match the harness we're comparing against.
+    #   max_new_tokens: int   -> overrides infer.py's 512 (a --max-new-tokens flag still wins)
+    #   pin_pixels: bool      -> False leaves image resolution at the model default, i.e.
+    #                            ignores models.yaml's min/max_pixels for this bench
+    INFER_DEFAULTS: dict[str, Any] = {}
     # Note: scoring runs in whatever conda env is active when evaluate.py is invoked.
     # The adapter does NOT hardcode an env name; each bench's scoring deps are documented
     # in the README — activate an env that has them before scoring.
