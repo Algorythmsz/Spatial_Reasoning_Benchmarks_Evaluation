@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Train/train.py — SFT driver (in-process ms-swift) for the MultihopSpatial upper-bound.
+"""train/train.py — SFT driver (in-process ms-swift) for the MultihopSpatial upper-bound.
 
-Fine-tunes a base VLM on the LEAKAGE-FREE MHS train split (Train/prepare_mhs_sft.py output),
+Fine-tunes a base VLM on the LEAKAGE-FREE MHS train split (train/prepare_mhs_sft.py output),
 in the exact output format the multihopspatial scorer parses, so the resulting checkpoint is
 directly evaluable with the normal infer.py / evaluate.py --benchmarks multihopspatial path.
 Supports LoRA and full FT (tuner_type). Mirrors infer.py's in-process swift usage:
@@ -9,9 +9,9 @@ Supports LoRA and full FT (tuner_type). Mirrors infer.py's in-process swift usag
     here:      sft_main(SftArguments(**kwargs))      # ms-swift 4.4.1: swift.arguments/pipelines
 
 Usage (inference env; set POST_CRISP_ROOT / BENCH_DATA_DIR / HF_HOME):
-    python Train/train.py --tuner-type lora
-    python Train/train.py --tuner-type full          # 9B full FT -> DeepSpeed ZeRO-3 (+offload)
-    python Train/train.py --tuner-type lora --dry-run   # print kwargs, don't train
+    python train/train.py --tuner-type lora
+    python train/train.py --tuner-type full          # 9B full FT -> DeepSpeed ZeRO-3 (+offload)
+    python train/train.py --tuner-type lora --dry-run   # print kwargs, don't train
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def main() -> int:
     bench_data = os.environ.get("BENCH_DATA_DIR", str(REPO / "benchmarks" / "data"))
     dataset = args.dataset or os.path.join(bench_data, DEFAULT_DATASET)
     if not Path(dataset).exists():
-        raise SystemExit(f"dataset not found: {dataset}\n  run: python Train/prepare_mhs_sft.py")
+        raise SystemExit(f"dataset not found: {dataset}\n  run: python train/prepare_mhs_sft.py")
 
     root = os.environ.get("POST_CRISP_ROOT", str(REPO))
     tag = args.base.rstrip("/").split("/")[-1].lower()
