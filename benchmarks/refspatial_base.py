@@ -18,6 +18,9 @@ class RefSpatialBase(BenchmarkAdapter):
     name: str = ""                                     # subclass: registered benchmark name
     HF_REPO: str = ""                                  # subclass: HF dataset repo id
     SUBSETS: tuple[str, ...] = ()                      # subclass: each has question.json / image/ / mask/
+    # Subsets scored and reported per-subset, but kept OUT of `overall` and out of the
+    # step/category/scene breakdowns, so those all share one denominator. Empty by default.
+    OVERALL_EXCLUDE_SUBSETS: tuple[str, ...] = ()
 
     MODEL_SPECIFIC_PROMPT = True
     INFER_DEFAULTS = {"min_pixels": 1024 * 32 * 32}
@@ -286,6 +289,7 @@ class RefSpatialBase(BenchmarkAdapter):
         # question.json has no such field at all, so rows without it are left out of the
         # breakdown rather than bucketed under a guessed label.
         by_scene: dict[str, list[float]] = defaultdict(list)
+        excluded: dict[str, int] = defaultdict(int)             # subset -> rows kept out of overall
         missing = no_scene = 0
 
         for answer in tqdm(answers):
@@ -317,8 +321,13 @@ class RefSpatialBase(BenchmarkAdapter):
                 ]).mean())
 
             answer["accuracy"] = acc
+            subset = answer.get("subset") or "?"
+            by_subset[subset].append(acc)                      # every subset stays visible here
+            if subset in self.OVERALL_EXCLUDE_SUBSETS:
+                excluded[subset] += 1
+                continue
+
             acc_all.append(acc)
-            by_subset[answer.get("subset") or "?"].append(acc)
             by_step[str(answer.get("step"))].append(acc)
             by_category[answer.get("category") or "?"].append(acc)
             scene = answer.get("scene") or None
@@ -328,7 +337,9 @@ class RefSpatialBase(BenchmarkAdapter):
                 by_scene[scene].append(acc)
 
         overall = float(np.mean(acc_all)) if acc_all else 0.0
+        exc = ", ".join(f"{k} {v}" for k, v in sorted(excluded.items()))
         print(f"[{self.name} score] {name}={overall:.4f}  (n={len(acc_all)}, missing_mask={missing}"
+              + (f", excluded_from_overall: {exc}" if exc else "")
               + (f", unlabelled_scene={no_scene}" if no_scene else "") + ")")
 
         # _agg -> summary_report shape; _cells -> make_table / print_summary shape
@@ -351,6 +362,7 @@ class RefSpatialBase(BenchmarkAdapter):
                 "parse_function": name,
                 "missing_mask": missing,
                 "unlabelled_scene": no_scene,
+                "excluded_from_overall": dict(sorted(excluded.items())),
             }, f, ensure_ascii=False, indent=2)
 
         # metrics.json (written by evaluate.py from this return) -> feeds make_table.
@@ -361,4 +373,5 @@ class RefSpatialBase(BenchmarkAdapter):
             "task": _cells(by_step),
             "scene": _cells(by_scene),                          # empty when the release has no scene labels
             "parse_function": name,
+            "excluded_from_overall": dict(sorted(excluded.items())),
         }
