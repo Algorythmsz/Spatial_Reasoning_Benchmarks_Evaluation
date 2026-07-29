@@ -189,50 +189,26 @@ export SS_NO_LLM=1     # rule-only: skip the Stage-2 judge LLM
 ```
 Other optional overrides: `SS_LLM_PATH` (judge, default `openai/gpt-oss-20b`), `SS_SCORER` (a different scorer checkout), `SS_TP_SIZE` / `SS_GPU_MEM` (judge vllm knobs).
 
-### RefSpatial_bench & RefSpatial_expand ###
-The RefSpatial family asks the model to output 2D point coordinates `[x, y]`. The official code
-pairs a different prompt with a different parsing function per model, and Qwen is not covered
-correctly by that mapping. The official prompt asks for coordinates between 0 and 1, but Qwen
-answers in the 0–1000 space it was trained to emit for grounding, while the parser paired with Qwen
-reads those numbers as raw pixels. Qwen also answers in JSON (`{"point_2d": [x, y]}`), which the
-official `json` parser cannot read — it expects Gemini's `"point": [y, x]` and always an array. So we
-added a `qwen` parser that reuses the official `/1000` conversion unchanged and adapts only the
-reading: Qwen's key, Qwen's axis order, and tolerance for a bare object or a missing code fence. It is
-selected automatically for Qwen models; scoring is the official point-in-mask metric, untouched.
+### MultihopSpatial ###
+**Inference env** is need to be used.
+```bash
+conda activate <inference-env>        
+python evaluate.py --benchmarks multihopspatial --models qwen3vl-4b
+```
 
-### multihopspatial — the official evaluator, minus its retry loop ###
+### RefSpatial_bench ###
+**Inference env** is need to be used.
+```bash
+conda activate <inference-env>        
+python evaluate.py --benchmarks refspatial_bench --models qwen3vl-4b
+```
 
-The authors' harness is public, so the protocol is theirs.
-[`benchmarks/vendor/multihopspatial/`](benchmarks/vendor/multihopspatial/) holds
-byte-identical copies of `eval/*.py`, and the adapter imports the functions that decide what
-a score means — `build_prompt`, `parse_response`, `calculate_iou`, `compute_score`,
-`calculate_full_metrics` — and uses them unchanged.
-
-Upstream ships **one evaluator per model family and they are not interchangeable**: Qwen gets
-a bare `Bounding Box: [x1, y1, x2, y2]` and a `/1000` rescue for its native 0–1000 output,
-GPT/Claude get `bbox_2d` in an explicit 0–1 range with no rescaling, and Gemini uses
-`[y1, x1, y2, x2]`. Picking the wrong one produces wrong numbers with no error, so the family
-is resolved from the model, recorded per sample, and reused when parsing the response back.
-An unrecognised model is refused rather than guessed at. *(Note: the prompt printed in the
-paper is the GPT/Claude one, not Qwen's.)*
-
-**What we don't reproduce is the retry loop.** Upstream re-generates any response whose
-answer or bbox fails to parse, up to 3 rounds. Doing that means handing the generation loop
-to upstream's code, which needs a custom inference path, an engine shim, and sampled
-decoding (a retry at temperature 0 reproduces the same string) — a lot of machinery for a
-bound measured at 1.8% of responses (80/4500 on qwen3vl-4b). So inference runs this repo's
-normal single-pass, greedy, deterministic path, and **the numbers are a slight
-under-estimate versus the paper's protocol**: an unparseable response is scored as-is
-instead of retried. Say so when comparing to published numbers.
-
-Two of upstream's generation settings are kept, because they change what the model sees
-rather than how it is scored (`INFER_DEFAULTS` on the adapter):
-
-| | multihopspatial | our other benches |
-|---|---|---|
-| `min/max_pixels` | **not set** (model default) | pinned to the SpatialScore protocol |
-| `max_new_tokens` | 8192 | 512 |
-
+### RefSpatial_expand ###
+**Inference env** is need to be used.
+```bash
+conda activate <inference-env>        
+python evaluate.py --benchmarks refspatial_expand --models qwen3vl-4b
+```
 ---
 
 ## 📊 Make a table for results
@@ -284,7 +260,7 @@ reference for that benchmark. Two steps, both in the inference env:
 
 ```bash
 python train/prepare_mhs_sft.py                  # multihop_train_6791.json -> ms-swift SFT jsonl
-python train/train.py --tuner-type lora          # or: --tuner-type full   (--dry-run to inspect kwargs)
+python train/mhs_sft.py --tuner-type lora        # or: --tuner-type full   (--dry-run to inspect kwargs)
 ```
 
 - Trains on `multihop_train_6791.json`, **disjoint from the 4500-question eval set** — no leakage.
@@ -400,7 +376,7 @@ benchmarks/data/<name>/         raw data + <name>.jsonl (prepared input)   [BENC
 preds/<model-tag>/<name>.jsonl  predictions (+ <name>.done.json flag)      [PREDS_DIR]
 results/<model-tag>/<name>/     all_results.json, summary_report.json, metrics.json  [RESULTS_DIR]
 table/<name>.csv                make_table.py --csv output (leaderboards)  [TABLE_DIR]
-sft/mhs-<base>-<tuner>/         train/train.py checkpoints
+sft/mhs-<base>-<tuner>/         train/mhs_sft.py checkpoints
 ```
 
 `benchmarks/vendor/` holds byte-identical copies of the benchmarks' official code (SpatialScore's scorer, MultihopSpatial's whole evaluator) — read-only, each with its own README.
@@ -408,3 +384,22 @@ sft/mhs-<base>-<tuner>/         train/train.py checkpoints
 Everything except `benchmarks/data/` (which follows `BENCH_DATA_DIR`) sits under
 `POST_CRISP_ROOT`, and each row is individually overridable via the env var in brackets
 (see `benchmarks/base.py`; `TABLE_DIR` in `make_table.py`).
+
+---
+
+## 📄 License
+
+This harness is MIT-licensed — see [LICENSE](LICENSE).
+
+`benchmarks/vendor/` is **not** covered by it. Those files are byte-identical copies of other
+projects' code and keep their own terms, with the license text next to them:
+
+| Vendored | Upstream | License |
+|---|---|---|
+| `benchmarks/vendor/multihopspatial/` | [youngwanLEE/multihopspatial](https://github.com/youngwanLEE/multihopspatial) @ `ab711b8`, `eval/*.py` | Apache-2.0 |
+| `benchmarks/vendor/spatialscore/` | [haoningwu3639/SpatialScore](https://github.com/haoningwu3639/SpatialScore), `evaluate_results.py` + `utils/` | MIT |
+
+Both require the license text to travel with the code, which is why each directory carries its
+own `LICENSE`. Apache-2.0 additionally requires modified files to say so — another reason those
+copies are read-only. The benchmark datasets themselves are licensed by their publishers; see
+each dataset's page on the Hugging Face Hub.
