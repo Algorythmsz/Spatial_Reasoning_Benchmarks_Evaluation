@@ -54,7 +54,7 @@ class SpatialScoreAdapter(BenchmarkAdapter):
         except OSError as e:
             print(f"[spatialscore] could not remove zip: {e}")
 
-    # Load raw data from the dataset
+    # Load raw data from the dataset (def load_and_process_data from test_qwen.py)
     def load_raw(self) -> list[dict[str, Any]]:
         nd = self.data_dir / NDJSON_NAME
         if not nd.exists():
@@ -84,7 +84,7 @@ class SpatialScoreAdapter(BenchmarkAdapter):
                 rows.append(item)
         return rows
 
-    # per-question-type instruction (originally from SpatialScore repository)
+    # per-question-type instruction (def process_model_input from test_qwen.py)
     @staticmethod
     def _assistant_prompt(sample: dict[str, Any]) -> str:
         qtype = (sample.get("question_type") or "").lower()
@@ -93,25 +93,23 @@ class SpatialScoreAdapter(BenchmarkAdapter):
                 "**Please select the most appropriate answer from the given options.**\n"
                 "**Respond ONLY with the capital letter and its parentheses.**\n\nQuestion: "
             )
-        if qtype == "judgement":
+        elif qtype == "judgement":
             return (
                 "**Please answer with yes or no based on the image.**\n"
                 "**Respond ONLY with 'yes' or 'no'.**\n\nQuestion: "
             )
-        if qtype == "open-ended":
+        elif qtype == "open-ended":
             extra = sample.get("extra_info") or {}
             if "answer_value" in extra and "answer_unit" in extra:
                 return (
-                    "Please answer the question by measuring the precise distance in 3D "
-                    "space through 2D images or videos.\nRespond ONLY with a numeric answer "
-                    "consisting of a scalar and a distance unit in the format of "
-                    "**\\scalar{scalar} \\distance_unit{distance unit}**.\n\nQuestion: "
+                    "Please answer the question by measuring the precise distance in 3D space through 2D images or videos.\n"
+                    "Respond ONLY with a numeric answer consisting of a scalar and a distance unit in the format of **\\scalar{scalar} \\distance_unit{distance unit}**.\n\nQuestion: "
                 )
-            return (
-                "**Please answer the question based on the given image or video.**\n"
-                "**Respond ONLY with a concise and accurate scalar or a scalar with "
-                "corresponding unit.**\n\nQuestion: "
-            )
+            else:
+                return (
+                    "**Please answer the question based on the given image or video.**\n"
+                    "**Respond ONLY with a concise and accurate scalar or a scalar with corresponding unit.**\n\nQuestion: "
+                )
         return "Question: "
 
     def _abs(self, rel: str) -> str:
@@ -119,7 +117,7 @@ class SpatialScoreAdapter(BenchmarkAdapter):
         rel = rel[2:] if rel.startswith("./") else rel   # drop leading "./"
         return str((self.data_dir / IMAGES_SUBDIR / rel).resolve())
 
-    # one raw row -> one ms-swift row
+    # one raw row -> one ms-swift row (message assembly of def process_model_input from test_qwen.py)
     def to_messages(self, row: dict[str, Any], model=None) -> dict[str, Any] | None:  # model-agnostic prompt; model unused
 
         image_paths = row.get("image_paths") or []
@@ -161,7 +159,7 @@ class SpatialScoreAdapter(BenchmarkAdapter):
         ]
         return swift_record(row.get("id"), images=images, meta=meta, messages=messages)
 
-    # Reshape ms-swift output jsonl -> test_qwen.py (from official SpatialScore) style json
+    # Reshape ms-swift output jsonl -> the result_entry dict def main builds in test_qwen.py
     def reshape(self, preds_path: Path, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)                 # ensure results dir exists (idempotent)
         entries: list[dict[str, Any]] = []                         # rows to dump into all_results.json
@@ -209,6 +207,7 @@ class SpatialScoreAdapter(BenchmarkAdapter):
             json.dump(entries, f, ensure_ascii=False, indent=2)   # JSON array (evaluate_results.py also accepts ndjson)
         print(f"[spatialscore reshape] {len(entries)} rows -> {out}")  # trace: how many rows were written and where
 
+    # Runs the official scorer as-is (evaluate_results.py, vendored under vendor/spatialscore/)
     def score(self, in_dir: Path, **opts: Any) -> dict[str, Any]:
         import os                                                   # stdlib; local import keeps the module top minimal
         import sys                                                  # reuse the active env's python interpreter

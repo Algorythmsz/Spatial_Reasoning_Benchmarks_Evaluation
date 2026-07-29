@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """
-data_preparation.py — benchmark data download + ms-swift preprocessing orchestrator.
+data_preparation.py — benchmark data downloader.
+
+Downloads raw data.
 
 Usage:
     python data_preparation.py spatialscore
@@ -19,9 +21,9 @@ from benchmarks import base  # importing the package registers every adapter in 
 
 
 def main() -> int:
-    choices = base.list_adapters()                # dynamic: any registered adapter is valid (no hardcoded list)
+    choices = base.list_adapters()                # dynamic: any registered adapter is valid
     ap = argparse.ArgumentParser(
-        description="Download and preprocess benchmark datasets"
+        description="Download benchmark datasets (infer.py builds the input jsonl)"
     )
     ap.add_argument("benchmark", choices=choices + ["all"],
                     help=f"benchmark name ({' | '.join(choices)}) or 'all'")
@@ -35,7 +37,6 @@ def main() -> int:
         adapter = base.get_adapter(name)
         try:
             adapter.ensure_data()      # download if missing
-            adapter.preprocess()       # build ms-swift jsonl (auto-regenerated when fingerprint changes)
         except Exception as e:
             print(f"[FAIL] {name}: {type(e).__name__}: {e}")
             failures.append(name)
@@ -43,7 +44,7 @@ def main() -> int:
     if failures:
         print(f"Failed: {failures}")
         return 1
-    print(f"Success: {names}")
+    print(f"Success: {names}  (input jsonl is built by infer.py at inference time)")
     return 0
 
 

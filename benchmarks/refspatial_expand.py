@@ -1,6 +1,6 @@
 """RefSpatial-Expand — the expanded release: Location (241) + Placement (200), no Unseen.
 
-Everything below the dataset identity lives in refspatial.py: the per-model grounding
+Everything below the dataset identity lives in refspatial_base.py: the per-model grounding
 prompt, the five coordinate parsers, and point-in-mask scoring.
 """
 from __future__ import annotations

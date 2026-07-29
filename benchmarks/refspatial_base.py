@@ -14,20 +14,13 @@ from .base import BenchmarkAdapter, swift_record
 
 
 class RefSpatialBase(BenchmarkAdapter):
-    """Point-in-mask grounding, shared by every RefSpatial release.
-
-    The releases differ in exactly two things — the HF repo and which subsets exist — so a
-    subclass sets `name`, `HF_REPO` and `SUBSETS` and inherits the rest: the per-model
-    grounding prompt, all five coordinate parsers, and the point-in-mask scoring. They used
-    to be two 385-line files with 27 lines of real difference between them, which is how a
-    parser fix once had to be applied twice.
-    """
 
     name: str = ""                                     # subclass: registered benchmark name
     HF_REPO: str = ""                                  # subclass: HF dataset repo id
     SUBSETS: tuple[str, ...] = ()                      # subclass: each has question.json / image/ / mask/
 
     MODEL_SPECIFIC_PROMPT = True
+    INFER_DEFAULTS = {"min_pixels": 1024 * 32 * 32}
 
     # -- prepare: download from HF if missing --
     def ensure_data(self) -> None:
@@ -67,7 +60,8 @@ class RefSpatialBase(BenchmarkAdapter):
         return str((self.data_dir / subset / rel).resolve())
 
     def _prompt_for(self, row: dict[str, Any], model) -> str:
-        # Port of the official RefSpatial get_prompt(), branch-for-branch.
+        # per-model grounding prompt (def get_prompt from RoboRefer Evaluation/test_benchmark.py)
+        # Port of the official get_prompt(), branch-for-branch.
         # The official keys on the model NAME; our Model exposes tag + path, so we match
         # the same family substrings against "<tag> <path>" (e.g. "qwen3vl-32b
         # Qwen/Qwen3-VL-32B-Instruct"). Order mirrors the official if/elif chain.
@@ -82,7 +76,8 @@ class RefSpatialBase(BenchmarkAdapter):
             return f"Locate one point of {obj}."
         if "qwen" in name:
             return f"Locate {obj} in this image and output the point coordinates in JSON format."
-        return f"{prompt} {suffix}".strip()                    # dataset default (official `else`)
+        else:
+            return f"{prompt} {suffix}".strip()
 
     def to_messages(self, row: dict[str, Any], model=None) -> dict[str, Any]:
         subset = row["_subset"]
@@ -100,7 +95,9 @@ class RefSpatialBase(BenchmarkAdapter):
         uid = f"{subset}-{row.get('id')}"
         return swift_record(uid, text, images, meta=meta)
 
-    # Reshape ms-swift preds jsonl -> a flat all_results.json the scorer consumes.
+    # Reshape ms-swift preds jsonl -> a flat all_results.json the scorer consumes
+    # (the answers jsonl def eval_task writes in RoboRefer Evaluation/test_benchmark.py:
+    #  question_id / text / mask_path)
     def reshape(self, preds_path: Path, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         entries: list[dict[str, Any]] = []
@@ -137,6 +134,7 @@ class RefSpatialBase(BenchmarkAdapter):
         print(f"[{self.name} reshape] {len(entries)} rows -> {out}")
 
 
+    # (def text2pts from RoboRefer Evaluation/summarize_acc.py)
     @staticmethod
     def _text2pts(text: str, width: int = 640, height: int = 480, is_absolute: bool = False) -> list[tuple[int, int]]:
 
@@ -163,6 +161,7 @@ class RefSpatialBase(BenchmarkAdapter):
                 points.extend(list(np.stack([x + x0, y + y0], axis=1)))
         return np.array(points)
 
+    # (def xml2pts from RoboRefer Evaluation/summarize_acc.py)
     @staticmethod
     def _xml2pts(text: str, width: int, height: int) -> np.ndarray:
         pattern = re.compile(r'(x\d+)="(-?\d+\.?\d*)"\s+(y\d+)="(-?\d+\.?\d*)"')
@@ -172,6 +171,7 @@ class RefSpatialBase(BenchmarkAdapter):
             for _, x, _, y in matches
         ])
 
+    # (def json2pts from RoboRefer Evaluation/summarize_acc.py)
     @staticmethod
     def _json2pts(text: str, width=640, height=480) -> np.ndarray:
         match = re.search(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
@@ -192,14 +192,14 @@ class RefSpatialBase(BenchmarkAdapter):
         return np.array(points)
 
 
+    # (ours — json2pts adapted to Qwen's key/axis order; see the docstring)
     @staticmethod
-    def _norm1000_pts(text: str, width: int, height: int) -> np.ndarray:
+    def _qwen2pts(text: str, width: int, height: int) -> np.ndarray:
         text = text or ""
         raw: list[tuple[float, float]] = []
 
-        # 1) JSON points. Qwen3-VL grounding emits ```json [{"point_2d": [x, y], "label": …}]```
-        #    (point_2d is [x, y]); also accept a Gemini-style "point": [y, x]. Extract the code
-        #    fence if present, else try the whole string.
+        # 1) JSON points — `point_2d` (Qwen, [x, y]) or `point` (Gemini, [y, x]). Extract the
+        #    code fence if present, else try the whole string.
         m = re.search(r"```(?:\w+)?\s*(.*?)```", text, re.DOTALL)
         try:
             data = json.loads((m.group(1) if m else text).strip())
@@ -222,20 +222,13 @@ class RefSpatialBase(BenchmarkAdapter):
                 if len(nums) == 2:
                     raw.append((nums[0], nums[1]))
 
-        # magnitude rule: v in [0,1] -> v*dim ; |v|>1 -> v/1000*dim (norm1000).
-        points: list[tuple[int, int]] = []
-        for x, y in raw:
-            x = x * width if abs(x) <= 1 else x / 1000 * width
-            y = y * height if abs(y) <= 1 else y / 1000 * height
-            points.append((int(x), int(y)))
+        points = [(int(x / 1000 * width), int(y / 1000 * height)) for x, y in raw]
         return np.array(points) if points else np.empty((0, 2), dtype=int)
 
+    # per-model parser dispatch (def main from RoboRefer Evaluation/summarize_acc.py),
+    # except Qwen -> qwen instead of absolute
     @staticmethod
     def _parser_for_model(model) -> str:
-        # Auto parser when --parse-function is OMITTED: mirrors the official main()'s per-model
-        # dispatch (keyed on tag+path substrings), but Qwen -> qwen1000 because our JSON prompt makes Qwen emit point_2d, which the original's `absolute`/text2pts cannot
-        # read. Order mirrors the official if/elif chain. The user can still force any parser
-        # via --parse-function (that overrides this).
         name = f"{getattr(model, 'tag', '')} {getattr(model, 'path', '')}".lower() if model is not None else ""
         if "molmo" in name:
             return "xml"
@@ -244,16 +237,17 @@ class RefSpatialBase(BenchmarkAdapter):
         if "robobrain" in name:
             return "absolute"
         if "qwen" in name:
-            return "qwen1000"
+            return "qwen"
         return "normalized"                                    # RoboPoint/Claude/GPT4O/RoboRefer + default
 
-    # Score: fraction of predicted points that land inside the GT mask (RoboRefer metric).
-    # parse_function: which point parser(s) to score with. OMIT -> AUTO: the model's parser
-    #   (_parser_for_model, evaluate.py passes `model`), fixed BEFORE scoring. PASS -> force it
-    #   for every model. Either way the reported score comes from ONE parser chosen up front,
-    #   never from comparing outcomes — comma-separating several only adds side-by-side files
-    #   (first = primary). See PARSERS below. **opts: ignored.
     def score(self, in_dir: Path, parse_function: str | None = None, model=None, **opts: Any) -> dict[str, Any]:
+        """Point-in-mask accuracy (def compute_accuracy from RoboRefer Evaluation/summarize_acc.py),
+        scored with exactly ONE parser.
+
+        parse_function: OMIT -> auto-picked from the model (_parser_for_model); PASS -> forced.
+        Either way it is a single parser, fixed before any scoring happens, so the reported
+        number can never be the best of several tried. **opts: ignored.
+        """
 
         results_path = in_dir / "all_results.json"
         if not results_path.exists():
@@ -266,127 +260,105 @@ class RefSpatialBase(BenchmarkAdapter):
         #   absolute   -> _text2pts with is_absolute=True (no scaling; RoboBrain/Qwen in main())
         #   xml        -> _xml2pts  (Molmo x_i="..." y_i="..." / 100)
         #   json       -> _json2pts (```json [{"point":[y,x]}] /1000)
-        #   qwen1000   -> _norm1000_pts (Qwen norm1000 magnitude rule; (x,y) tuples + point_2d)
+        #   qwen       -> _qwen2pts  (Qwen point_2d/[x,y]; _json2pts' /1000 conversion reused)
         PARSERS = {
             "normalized": lambda text, w, h: self._text2pts(text, w, h, False),
             "absolute":   lambda text, w, h: self._text2pts(text, w, h, True),
             "xml":        self._xml2pts,
             "json":       self._json2pts,
-            "qwen1000":   self._norm1000_pts,
+            "qwen":       self._qwen2pts,
         }
         if parse_function is None:
-            # AUTO: ONE parser, decided from the model alone (official main()'s dispatch, with
-            # Qwen -> qwen1000). Fixed before any scoring happens, so the reported number never
-            # depends on which parser happened to score higher on this test set.
-            names = [self._parser_for_model(model)]
-            print(f"[{self.name} score] auto: parse_function={names[0]!r} for model="
+            name = self._parser_for_model(model)
+            print(f"[{self.name} score] auto: parse_function={name!r} for model="
                   f"{getattr(model, 'tag', None)!r}; --parse-function overrides")
         else:
-            # EXPLICIT: user forces the parser(s); first one is primary.
-            names = [p.strip().lower() for p in parse_function.split(",") if p.strip()]
-            if not names:
-                raise SystemExit(f"{self.name} --parse-function is empty; choose one of {sorted(PARSERS)}")
-        for n in names:
-            if n not in PARSERS:
-                raise SystemExit(f"parse_function={n!r} unknown; choose one of {sorted(PARSERS)}")
+            name = parse_function.strip().lower()
+        if name not in PARSERS:
+            raise SystemExit(f"parse_function={name!r} unknown; choose one of {sorted(PARSERS)}")
+        parse = PARSERS[name]
 
-
-        acc_all: dict[str, list[float]] = {n: [] for n in names}
-        by_subset = {n: defaultdict(list) for n in names}
-        by_step = {n: defaultdict(list) for n in names}
-        by_category = {n: defaultdict(list) for n in names}
-        missing = 0
+        acc_all: list[float] = []
+        by_subset: dict[str, list[float]] = defaultdict(list)
+        by_step: dict[str, list[float]] = defaultdict(list)
+        by_category: dict[str, list[float]] = defaultdict(list)
+        # scene (indoor/outdoor) is only labelled in some releases — RefSpatial-Bench's
+        # question.json has no such field at all, so rows without it are left out of the
+        # breakdown rather than bucketed under a guessed label.
+        by_scene: dict[str, list[float]] = defaultdict(list)
+        missing = no_scene = 0
 
         for answer in tqdm(answers):
             mask_path = answer.get("mask_path")
             if not mask_path or not os.path.exists(mask_path):
                 missing += 1
-                for n in names:
-                    answer[f"accuracy_{n}"] = None
                 answer["accuracy"] = None
                 continue
 
             mask = np.array(Image.open(mask_path)) / 255.0
-            
             if mask.ndim == 3:
                 mask = mask[:, :, 0]
             mask = (mask > 0).astype(np.uint8)
 
-            subset, step, category = answer.get("subset") or "?", str(answer.get("step")), answer.get("category") or "?"
-            for n in names:
-                try:                                           # official compute_accuracy: print + skip
-                    points = PARSERS[n](answer["text"], mask.shape[1], mask.shape[0])
-                except Exception as e:
-                    print(f"Failed to parse question {answer.get('id')} ({n}): {e}")
-                    answer[f"accuracy_{n}"] = None
-                    continue
+            try:                                               # official compute_accuracy: print + skip
+                points = parse(answer["text"], mask.shape[1], mask.shape[0])
+            except Exception as e:
+                print(f"Failed to parse question {answer.get('id')} ({name}): {e}")
+                answer["accuracy"] = None
+                continue
 
-                acc = 0.0
-                if len(points) > 0:
-                    in_range = (points[:, 0] >= 0) & (points[:, 0] < mask.shape[1]) & \
-                               (points[:, 1] >= 0) & (points[:, 1] < mask.shape[0])
-                    acc = float(np.concatenate([
-                        mask[points[in_range, 1], points[in_range, 0]],
-                        np.zeros(points.shape[0] - in_range.sum())
-                    ]).mean())
+            acc = 0.0
+            if len(points) > 0:
+                in_range = (points[:, 0] >= 0) & (points[:, 0] < mask.shape[1]) & \
+                           (points[:, 1] >= 0) & (points[:, 1] < mask.shape[0])
+                acc = float(np.concatenate([
+                    mask[points[in_range, 1], points[in_range, 0]],
+                    np.zeros(points.shape[0] - in_range.sum())
+                ]).mean())
 
-                answer[f"accuracy_{n}"] = acc
-                acc_all[n].append(acc)
-                by_subset[n][subset].append(acc)
-                by_step[n][step].append(acc)
-                by_category[n][category].append(acc)
+            answer["accuracy"] = acc
+            acc_all.append(acc)
+            by_subset[answer.get("subset") or "?"].append(acc)
+            by_step[str(answer.get("step"))].append(acc)
+            by_category[answer.get("category") or "?"].append(acc)
+            scene = answer.get("scene") or None
+            if scene is None:
+                no_scene += 1
+            else:
+                by_scene[scene].append(acc)
 
-        # primary parser: always the first name — the auto-picked one, or the first the user
-        # listed. Never chosen by comparing scores.
-        primary = names[0]
-        for answer in answers:                                 # backward-compat per-question field
-            answer["accuracy"] = answer.get(f"accuracy_{primary}")
+        overall = float(np.mean(acc_all)) if acc_all else 0.0
+        print(f"[{self.name} score] {name}={overall:.4f}  (n={len(acc_all)}, missing_mask={missing}"
+              + (f", unlabelled_scene={no_scene}" if no_scene else "") + ")")
 
-        print(f"[{self.name} score] "
-              + "  ".join(f"{n}={(float(np.mean(acc_all[n])) if acc_all[n] else 0.0):.4f}" for n in names)
-              + f"  (primary={primary}, n={len(acc_all[primary])}, missing_mask={missing})")
-
-        # Per-parser artifacts. _summary -> summary_report shape; _metrics -> make_table /
-        # print_summary shape ({accuracy, count}; subset -> sub_task, step -> task).
+        # _agg -> summary_report shape; _cells -> make_table / print_summary shape
+        # ({accuracy, count}; subset -> sub_task, step -> task).
         def _agg(d: dict[str, list[float]]) -> dict[str, dict[str, float]]:
             return {k: {"n": len(v), "acc": float(np.mean(v)) if v else 0.0} for k, v in sorted(d.items())}
         def _cells(d: dict[str, list[float]]) -> dict[str, dict[str, float]]:
             return {k: {"accuracy": float(np.mean(v)) if v else 0.0, "count": len(v)} for k, v in sorted(d.items())}
-        def _summary(n: str) -> dict[str, Any]:
-            return {
-                "overall": {"n": len(acc_all[n]), "acc": float(np.mean(acc_all[n])) if acc_all[n] else 0.0},
-                "by_subset": _agg(by_subset[n]),
-                "by_step": _agg(by_step[n]),
-                "by_category": _agg(by_category[n]),
-                "parse_function": n,
-                "missing_mask": missing,
-            }
-        def _metrics(n: str) -> dict[str, Any]:
-            return {
-                "overall": {"accuracy": float(np.mean(acc_all[n])) if acc_all[n] else 0.0, "count": len(acc_all[n])},
-                "category": _cells(by_category[n]),
-                "sub_task": _cells(by_subset[n]),
-                "task": _cells(by_step[n]),
-                "parse_function": n,
-            }
 
-        with open(results_path, "w", encoding="utf-8") as f:   # per-question accuracy_* back into all_results.json
+        with open(results_path, "w", encoding="utf-8") as f:   # per-question accuracy back in
             json.dump(answers, f, ensure_ascii=False, indent=2)
 
-        # summary_report.json is always the PRIMARY (so single-parser output is unchanged).
         with open(in_dir / "summary_report.json", "w", encoding="utf-8") as f:
-            json.dump(_summary(primary), f, ensure_ascii=False, indent=2)
+            json.dump({
+                "overall": {"n": len(acc_all), "acc": overall},
+                "by_subset": _agg(by_subset),
+                "by_step": _agg(by_step),
+                "by_category": _agg(by_category),
+                "by_scene": _agg(by_scene),                     # empty when the release has no scene labels
+                "parse_function": name,
+                "missing_mask": missing,
+                "unlabelled_scene": no_scene,
+            }, f, ensure_ascii=False, indent=2)
 
-        # Several parsers -> also drop a standalone file pair PER parser, name-suffixed
-        # (metrics_<name>.json / summary_report_<name>.json). Each is a full, independent
-        # result for that parser — no embedded by_parse_function.
-        if len(names) > 1:
-            for n in names:
-                with open(in_dir / f"summary_report_{n}.json", "w", encoding="utf-8") as f:
-                    json.dump(_summary(n), f, ensure_ascii=False, indent=2)
-                with open(in_dir / f"metrics_{n}.json", "w", encoding="utf-8") as f:
-                    json.dump(_metrics(n), f, ensure_ascii=False, indent=2)
-
-        # metrics.json (written by evaluate.py from this return) = the PRIMARY parser -> feeds
-        # make_table. parse_functions lists the others so a reader knows the _<name> files exist.
-        return {**_metrics(primary), "parse_functions": names}
+        # metrics.json (written by evaluate.py from this return) -> feeds make_table.
+        return {
+            "overall": {"accuracy": overall, "count": len(acc_all)},
+            "category": _cells(by_category),
+            "sub_task": _cells(by_subset),
+            "task": _cells(by_step),
+            "scene": _cells(by_scene),                          # empty when the release has no scene labels
+            "parse_function": name,
+        }

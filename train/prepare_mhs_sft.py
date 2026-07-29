@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root -> 
 
 from benchmarks.multihopspatial import (
     MultihopSpatialAdapter,
-    load_upstream,
+    upstream,
+    DEFAULT_FAMILY,
     HF_REPO,
     IMAGES_SUBDIR,
 )
@@ -67,7 +68,11 @@ def main() -> int:
         snapshot_download(HF_REPO, repo_type="dataset", local_dir=str(root),
                           allow_patterns=[f"{IMAGES_SUBDIR}/*"])
 
-    build_prompt = load_upstream().build_prompt          # official prompt = eval-time prompt
+    # Official prompt = eval-time prompt. Upstream ships one evaluator per model family and
+    # the prompts differ (see benchmarks/multihopspatial.py::FAMILY_MODULES); we SFT Qwen
+    # bases, so this is the qwen one — the same module family_for() resolves at eval time.
+    build_prompt = upstream(DEFAULT_FAMILY).build_prompt
+    image_root = adapter.data_dir / IMAGES_SUBDIR         # adapter._abs()'s root, minus the private call
     train = json.load(open(tj, encoding="utf-8"))
     out = root / OUT_NAME
     n = skipped = missing_img = 0
@@ -82,7 +87,7 @@ def main() -> int:
             except Exception:
                 skipped += 1
                 continue
-            image_abs = str((adapter.image_root / img).resolve())
+            image_abs = str((image_root / img).resolve())
             if not Path(image_abs).exists():
                 missing_img += 1
                 continue

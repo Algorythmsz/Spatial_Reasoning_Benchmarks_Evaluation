@@ -74,12 +74,17 @@ class Model:
     min_pixels: int | None = None
     vllm_max_model_len: int | None = None     # vLLM context cap (--vllm_max_model_len); omit -> model config default
     vllm_tensor_parallel_size: int | None = None   # TP degree; omit -> infer.py auto = #CUDA_VISIBLE_DEVICES
+    # Pass-through to vLLM's EngineArgs (swift: --vllm_engine_kwargs). For knobs swift has no
+    # dedicated flag for, e.g. max_num_batched_tokens, which also sizes the multimodal encoder
+    # cache (vLLM: encoder_cache_size = max(max_num_batched_tokens, max tokens per mm item)).
+    vllm_engine_kwargs: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)   # pass-through for extra options
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Model": # models.yaml -> Model
         known = {"tag", "path", "subfolder", "model_type", "backend", "enable_thinking",
-                 "max_pixels", "min_pixels", "vllm_max_model_len", "vllm_tensor_parallel_size"}
+                 "max_pixels", "min_pixels", "vllm_max_model_len", "vllm_tensor_parallel_size",
+                 "vllm_engine_kwargs"}
         return cls(
             **{k: d[k] for k in known if k in d},
             extra={k: v for k, v in d.items() if k not in known},
@@ -159,6 +164,8 @@ class BenchmarkAdapter(ABC):
     #   max_new_tokens: int   -> overrides infer.py's 512 (a --max-new-tokens flag still wins)
     #   pin_pixels: bool      -> False leaves image resolution at the model default, i.e.
     #                            ignores models.yaml's min/max_pixels for this bench
+    #   min_pixels / max_pixels: int -> pin THESE instead of models.yaml's, for a bench whose
+    #                            official protocol specifies its own image budget
     INFER_DEFAULTS: dict[str, Any] = {}
     # Note: scoring runs in whatever conda env is active when evaluate.py is invoked.
     # The adapter does NOT hardcode an env name; each bench's scoring deps are documented
@@ -199,7 +206,7 @@ class BenchmarkAdapter(ABC):
           refspatial_expand's parse_function). Most benches ignore them.
         """
 
-    # ── Data preparation (called by data_preparation.py) ─────────────────────
+    # ── Data preparation (ensure_data: data_preparation.py; preprocess: infer.py) ────
     @property
     def data_dir(self) -> Path:
         """This bench's raw/preprocessed data folder. benchmarks/data/<name>/"""
@@ -211,6 +218,24 @@ class BenchmarkAdapter(ABC):
         Heavy deps (huggingface_hub, ...) are lazy-imported inside.
         """
         raise NotImplementedError(f"{self.name}: ensure_data() not implemented")
+
+    def _input_paths(self, model: "Model | None" = None) -> tuple[Path, Path]:
+ 
+        if self.MODEL_SPECIFIC_PROMPT and model is None:
+            raise ValueError(
+                f"{self.name}: the prompt depends on the model (MODEL_SPECIFIC_PROMPT), so "
+                f"the input jsonl cannot be built without one. Pass a Model.")
+        stem = f"{self.name}__{model.tag}" if self.MODEL_SPECIFIC_PROMPT else self.name
+        return self.data_dir / f"{stem}.jsonl", self.data_dir / f".{stem}.jsonl.sha"
+
+    def input_fingerprint(self, model: "Model | None" = None) -> str | None:
+        """md5 of the CURRENT input records, read from the sidecar preprocess wrote.
+        None when the input has never been built. Cheap — no re-preprocessing."""
+        _, sha = self._input_paths(model)
+        try:
+            return sha.read_text().strip()
+        except OSError:
+            return None
 
     def preprocess(self, model: "Model | None" = None) -> Path:
         """
@@ -235,12 +260,7 @@ class BenchmarkAdapter(ABC):
         blob = json.dumps(recs, sort_keys=True, ensure_ascii=False).encode("utf-8")
         fp = hashlib.md5(blob).hexdigest()
 
-        if self.MODEL_SPECIFIC_PROMPT and model is not None:
-            stem = f"{self.name}__{model.tag}"                  # per-model jsonl: prompt varies by model
-        else:
-            stem = self.name                                   # shared, model-agnostic jsonl
-        out = self.data_dir / f"{stem}.jsonl"
-        sha = self.data_dir / f".{stem}.jsonl.sha"
+        out, sha = self._input_paths(model)                    # per-model jsonl when the prompt varies
         if out.exists() and sha.exists() and sha.read_text().strip() == fp:
             print(f"[preprocess skip] {out}  ({len(recs)} samples, fp={fp[:12]})")
             return out
@@ -266,11 +286,20 @@ class BenchmarkAdapter(ABC):
     def results_dir(self, model: Model) -> Path:
         return RESULTS_DIR / model.tag / self.name
 
-    def mark_done(self, model: Model, n: int) -> None:
-        """Called by infer.py when inference finishes cleanly -> mark done (+ record expected sample count)."""
+    def mark_done(self, model: Model, n: int, config: dict[str, Any] | None = None) -> None:
+        """Called by infer.py when inference finishes cleanly -> mark done.
+
+        Records the expected sample count AND the settings that produced these predictions
+        (generation budget, pixel bounds, resolved checkpoint, input fingerprint). Without
+        that, nothing downstream can tell WHICH protocol a metrics.json came from — the only
+        evidence left is file mtimes and job logs.
+        """
         p = self.done_flag(model)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"n": n, "ts": time.time()}), encoding="utf-8")
+        payload: dict[str, Any] = {"n": n, "ts": time.time()}
+        if config:
+            payload["config"] = config
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def is_complete(self, model: Model) -> bool:
         """
@@ -282,10 +311,25 @@ class BenchmarkAdapter(ABC):
         if not (preds.exists() and flag.exists()):
             return False
         try:
-            expected = json.loads(flag.read_text())["n"]
+            recorded = json.loads(flag.read_text())
+            expected = recorded["n"]
         except Exception:
             return False
-        return _count_lines(preds) == expected
+        if _count_lines(preds) != expected:
+            return False
+
+        # Stale-input guard. If these predictions recorded the fingerprint of the input they
+        # were generated from and the current input hashes differently (the prompt or the
+        # data changed), they are not complete FOR THE CURRENT PROTOCOL — scoring them would
+        # silently report numbers from the old one. Runs written before this field existed
+        # carry no fingerprint and keep the previous count-only behaviour.
+        was = (recorded.get("config") or {}).get("input_fingerprint")
+        now = self.input_fingerprint(model)
+        if was and now and was != now:
+            print(f"[{self.name}/{model.tag}] stale predictions: input fingerprint "
+                  f"{was[:12]} != current {now[:12]} — re-run inference")
+            return False
+        return True
 
 
 def _count_lines(p: Path) -> int:

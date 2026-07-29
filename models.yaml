@@ -17,6 +17,8 @@
 #                    of GPUs SLURM allocated (CUDA_VISIBLE_DEVICES). A 2-GPU job MUST use
 #                    TP=2 or the model loads on one card and the KV cache starves (32B
 #                    OOMs at 86016 on 1 card, fits comfortably split across 2).
+#   vllm_engine_kwargs  raw pass-through to vLLM's EngineArgs, for knobs ms-swift has no
+#                    dedicated flag for. Only set it when a model needs it.
 #
 # ★ min/max_pixels are the SpatialScore test_qwen.py protocol values
 #   (AutoProcessor(min_pixels=256*28*28, max_pixels=2560*28*28)):
@@ -104,6 +106,14 @@ models:
     min_pixels: 200704
     max_pixels: 2007040
     vllm_max_model_len: 86016
+    # SpatialCorpus ckpts declare size.longest_edge=518400 in preprocessor_config.json (the
+    # base models declare 16777216), so vLLM profiles ~506 tokens as the max for one image and
+    # sizes its encoder cache at max(max_num_batched_tokens=2048, 506) = 2048. multihopspatial
+    # runs unpinned (INFER_DEFAULTS pin_pixels=False), and 15 of its images are big enough to
+    # need 2700-4800 embedding tokens -> "exceeds the pre-allocated encoder cache size 2048".
+    # Raising max_num_batched_tokens raises the cache with it, WITHOUT changing image
+    # resolution, so this model stays comparable to the others under upstream's protocol.
+    vllm_engine_kwargs: {max_num_batched_tokens: 8192}
 
   - tag: qwen3vl-8b-sft-spatialcorpus
     path: haoningwu/SpatialScore
@@ -113,6 +123,14 @@ models:
     min_pixels: 200704
     max_pixels: 2007040
     vllm_max_model_len: 86016
+    # SpatialCorpus ckpts declare size.longest_edge=518400 in preprocessor_config.json (the
+    # base models declare 16777216), so vLLM profiles ~506 tokens as the max for one image and
+    # sizes its encoder cache at max(max_num_batched_tokens=2048, 506) = 2048. multihopspatial
+    # runs unpinned (INFER_DEFAULTS pin_pixels=False), and 15 of its images are big enough to
+    # need 2700-4800 embedding tokens -> "exceeds the pre-allocated encoder cache size 2048".
+    # Raising max_num_batched_tokens raises the cache with it, WITHOUT changing image
+    # resolution, so this model stays comparable to the others under upstream's protocol.
+    vllm_engine_kwargs: {max_num_batched_tokens: 8192}
 
   # ── MultiHopSpatial finetune (etri-vilab, HF hub) ─────────────────────────
   - tag: mhs-qwen3vl-4b

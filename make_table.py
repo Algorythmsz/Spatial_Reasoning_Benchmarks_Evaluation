@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(os.environ.get("POST_CRISP_ROOT", ".")).resolve()
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", ROOT / "results"))
 TABLE_DIR = Path(os.environ.get("TABLE_DIR", ROOT / "table"))
-BREAKDOWNS = ("category", "task", "sub_task", "source_dataset")
+BREAKDOWNS = ("category", "task", "sub_task", "source_dataset", "scene")
 
 
 def load_metrics(bench: str) -> tuple[dict[str, dict], list[str]]:

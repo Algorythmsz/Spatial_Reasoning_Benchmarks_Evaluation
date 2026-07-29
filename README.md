@@ -5,7 +5,7 @@ in three separate steps:
 
 | step | script | environment | what it does |
 |---|---|---|---|
-| 1. prepare | `data_preparation.py` | inference env | download raw data (HF) → build a ms-swift jsonl |
+| 1. prepare | `data_preparation.py` | inference env | download raw data (HF) |
 | 2. infer | `infer.py` | inference env | `swift infer` each model over that jsonl → predictions + a `done.flag` |
 | 3. score | `evaluate.py` | inference env (scoring env for SpatialScore) | predictions → run the scorer → `metrics.json` |
 - 2 environments are needed: the inference env, plus a scoring env for SpatialScore's LLM judge.
@@ -134,8 +134,10 @@ export POST_CRISP_ROOT=<where-to-store-the-results>/post_crisp       # cache / p
 
 ## 📁 Prepare data
 
-Downloads each benchmark's raw data (into `benchmarks/data/<name>/`) and builds the
-ms-swift style input jsonl. 
+Downloads each benchmark's raw data into `benchmarks/data/<name>/`. That is all this step
+does — the ms-swift input jsonl is built by `infer.py`, because the prompt can depend on the
+model, so there is no single correct jsonl to build ahead of time. `infer.py` builds it per
+model and skips the work once the fingerprint matches.
 
 ```bash
 conda activate <inference-env>
@@ -148,7 +150,7 @@ The accepted names are the registered adapters, so anything in `benchmarks/` wor
 
 ## 🤖 Run inference
 
-Runs `swift infer` for each model over the prepared jsonl. Predictions go to
+Builds the input jsonl for each model (skipped when unchanged) and runs `swift infer` over it. Predictions go to
 `preds/<model-tag>/<benchmark>.jsonl`, plus a `<benchmark>.done.json` flag recording the expected
 sample count — a (model, benchmark) pair counts as finished only when the flag exists **and** the
 prediction line count matches, so a truncated run re-runs instead of being silently skipped.
@@ -191,8 +193,12 @@ Other optional overrides: `SS_LLM_PATH` (judge, default `openai/gpt-oss-20b`), `
 The RefSpatial family asks the model to output 2D point coordinates `[x, y]`. The official code
 pairs a different prompt with a different parsing function per model, and Qwen is not covered
 correctly by that mapping. The official prompt asks for coordinates between 0 and 1, but Qwen
-answers in the 0–1000 space it was trained to emit for grounding, while the parser paired with Qwen reads those numbers as raw pixels.  So we added a parsing/normalizing function, `qwen1000`, that rescales
-them before the point-in-mask check. It is selected automatically for Qwen models.
+answers in the 0–1000 space it was trained to emit for grounding, while the parser paired with Qwen
+reads those numbers as raw pixels. Qwen also answers in JSON (`{"point_2d": [x, y]}`), which the
+official `json` parser cannot read — it expects Gemini's `"point": [y, x]` and always an array. So we
+added a `qwen` parser that reuses the official `/1000` conversion unchanged and adapts only the
+reading: Qwen's key, Qwen's axis order, and tolerance for a bare object or a missing code fence. It is
+selected automatically for Qwen models; scoring is the official point-in-mask metric, untouched.
 
 ### multihopspatial — the official evaluator, minus its retry loop ###
 

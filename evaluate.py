@@ -53,10 +53,10 @@ def main() -> int:
     ap.add_argument("--models", help="comma-separated model tags from models.yaml, or 'all' for every model")
     ap.add_argument("--parse-function", dest="parse_function", default=None,
                     help="refspatial_bench/refspatial_expand: point parser to score with "
-                         "(normalized|absolute|xml|json|qwen1000). OMIT -> auto-picked from the "
-                         "model (qwen -> qwen1000). Exactly one parser is primary, fixed before "
-                         "scoring; comma-separate to also dump the others side by side (first = "
-                         "primary). Other benches ignore it.")
+                         "(normalized|absolute|xml|json|qwen). OMIT -> auto-picked from the "
+                         "model (a Qwen model -> qwen). Exactly one parser is used, fixed before "
+                         "scoring, so the number is never the best of several tried. Other "
+                         "benches ignore it.")
     args = ap.parse_args()
 
     # USER-supplied scoring options forwarded to adapter.score(**opts). Only pass keys the

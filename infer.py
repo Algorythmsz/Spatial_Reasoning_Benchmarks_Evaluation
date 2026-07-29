@@ -65,12 +65,15 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
     defaults = getattr(adapter, "INFER_DEFAULTS", {}) or {}
     max_new_tokens = max_new_tokens or defaults.get("max_new_tokens") or 512
     pin_pixels = defaults.get("pin_pixels", True)
+    # A bench whose official protocol specifies its own image budget overrides models.yaml.
+    min_px = defaults.get("min_pixels", model.min_pixels)
+    max_px = defaults.get("max_pixels", model.max_pixels)
 
     if pin_pixels:                                           # ms-swift reads these from the env
-        if model.min_pixels is not None:
-            os.environ["MIN_PIXELS"] = str(model.min_pixels)
-        if model.max_pixels is not None:
-            os.environ["MAX_PIXELS"] = str(model.max_pixels)  # also passed as max_pixels arg below
+        if min_px is not None:
+            os.environ["MIN_PIXELS"] = str(min_px)
+        if max_px is not None:
+            os.environ["MAX_PIXELS"] = str(max_px)            # also passed as max_pixels arg below
     else:                                                    # bench pins nothing -> model default
         os.environ.pop("MIN_PIXELS", None)
         os.environ.pop("MAX_PIXELS", None)
@@ -89,12 +92,14 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
     )
     if model.model_type is not None:                         # FT ckpts (etri/sft) match multiple swift types -> force it
         kwargs["model_type"] = model.model_type
-    if pin_pixels and model.max_pixels is not None:
-        kwargs["max_pixels"] = model.max_pixels              # upper bound (env covers the lower bound)
+    if pin_pixels and max_px is not None:
+        kwargs["max_pixels"] = max_px                        # upper bound (env covers the lower bound)
     if model.enable_thinking is not None:                    # e.g. Qwen3.5 -> False for a direct, parseable answer
         kwargs["enable_thinking"] = model.enable_thinking
     if model.vllm_max_model_len is not None:                 # cap KV cache: model config default (e.g. 262144) OOMs
         kwargs["vllm_max_model_len"] = model.vllm_max_model_len
+    if model.vllm_engine_kwargs:                             # raw EngineArgs pass-through (see models.yaml)
+        kwargs["vllm_engine_kwargs"] = model.vllm_engine_kwargs
     tp = model.vllm_tensor_parallel_size
     if tp is None:                                           # else split across every visible GPU (CUDA_VISIBLE_DEVICES)
         tp = len([d for d in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if d.strip()])
@@ -115,13 +120,47 @@ def run_infer(adapter: base.BenchmarkAdapter, model: base.Model, max_new_tokens:
     got = _count_lines(preds) if preds.exists() else 0
     if got != n:                                             # surface a short/absent output before marking done
         raise RuntimeError(f"{adapter.name}/{model.tag}: preds has {got} lines, expected {n}")
-    adapter.mark_done(model, n)                               # done.flag -> evaluate.py's is_complete gate
+
+    # What actually produced these predictions. Written into done.json so a reader (and
+    # is_complete's stale-input guard) can tell which protocol the numbers came from.
+    run_config = {
+        "benchmark": adapter.name,
+        "model_tag": model.tag,
+        "model_path": model_path,                             # resolved (subfolder ckpts included)
+        "model_type": model.model_type,
+        "backend": model.backend,
+        "enable_thinking": model.enable_thinking,
+        "max_new_tokens": max_new_tokens,
+        "temperature": 0.0,                                   # greedy, every bench
+        "pin_pixels": pin_pixels,
+        "min_pixels": min_px if pin_pixels else None,             # None -> model default
+        "max_pixels": max_px if pin_pixels else None,
+        "vllm_max_model_len": model.vllm_max_model_len,
+        "vllm_tensor_parallel_size": tp,
+        "vllm_engine_kwargs": model.vllm_engine_kwargs,
+        "val_dataset": str(val),
+        "input_fingerprint": adapter.input_fingerprint(model),  # md5 of the input records
+        "versions": _versions(),
+    }
+    adapter.mark_done(model, n, run_config)                   # done.flag -> evaluate.py's is_complete gate
     print(f"[infer] done {adapter.name}/{model.tag}: {n} preds -> {preds}")
 
 
 def _count_lines(p: Path) -> int:
     with open(p, "rb") as f:
         return sum(1 for _ in f)
+
+
+def _versions() -> dict[str, str]:
+    """Library versions that can move the numbers. Best-effort: never fail a finished run."""
+    out = {}
+    for pkg in ("ms-swift", "vllm", "transformers", "torch"):
+        try:
+            from importlib.metadata import version
+            out[pkg] = version(pkg)
+        except Exception:
+            pass
+    return out
 
 
 # ── entry point ──────────────────────────────────────────────────────────────

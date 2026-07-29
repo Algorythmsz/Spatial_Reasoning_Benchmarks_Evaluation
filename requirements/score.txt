@@ -1,5 +1,5 @@
 # scoring env (single, shared by all benchmarks) — evaluate.py runs the vendored
-# benchmarks/scorers/spatialscore/{evaluate_results.py, utils/util.py}.
+# benchmarks/vendor/spatialscore/{evaluate_results.py, utils/util.py}.
 # This is a superset of every scorer's deps: spatialscore needs the heavy vllm/torch
 # stack below, and refspatial_expand/multihopspatial only need numpy/pillow/PyYAML
 # (already pinned here), so one env covers all of them.
