@@ -2,7 +2,10 @@
 # ─────────────────────────────────────────────────────────────────────────
 # One entry per model. Schema mirrors benchmarks/base.py::Model.from_dict:
 #   tag              unique alias, used in preds/results folder names
-#   path             HF repo id (resolved from cache) OR absolute local path
+#   path             HF repo id (resolved from cache) OR a local checkpoint dir. ~ and $VARS
+#                    are expanded, so write a local ckpt as ${POST_CRISP_ROOT}/sft/... rather
+#                    than one machine's absolute path — this file is committed, and absolute
+#                    paths belong in the runtime env (see benchmarks/base.py).
 #   model_type       force ms-swift --model_type (e.g. qwen3_vl); needed for FT ckpts
 #                    whose config matches qwen3_vl / _emb / _reranker (auto-match fails)
 #   backend          "vllm" | "pt"                       (default: vllm)
@@ -161,7 +164,7 @@ models:
   # config default — matching upstream's evaluator, which pins nothing. They only take effect
   # if these checkpoints are ever run on spatialscore/refspatial (both of which we did run).
   - tag: mhs-qwen3vl-4b-sft
-    path: /data2/seungwon/post_crisp/sft/merged/mhs-qwen3-vl-4b-instruct-lora-merged
+    path: ${POST_CRISP_ROOT}/sft/merged/mhs-qwen3-vl-4b-instruct-lora-merged
     model_type: qwen3_vl          # ckpt config matches qwen3_vl / _emb / _reranker -> disambiguate
     backend: vllm
     min_pixels: 200704
@@ -169,7 +172,7 @@ models:
     vllm_max_model_len: 86016
 
   - tag: mhs-qwen3.5-4b-sft
-    path: /data2/seungwon/post_crisp/sft/merged/mhs-qwen3.5-4b-lora-merged
+    path: ${POST_CRISP_ROOT}/sft/merged/mhs-qwen3.5-4b-lora-merged
     model_type: qwen3_5
     backend: vllm
     enable_thinking: false        # same as the qwen3.5-* base entries: SFT targets are a bare

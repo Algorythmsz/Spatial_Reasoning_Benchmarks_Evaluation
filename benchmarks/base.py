@@ -16,6 +16,22 @@ CACHE_DIR   = Path(os.environ.get("CACHE_DIR",   ROOT / "cache"))
 PREDS_DIR   = Path(os.environ.get("PREDS_DIR",   ROOT / "preds"))
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", ROOT / "results"))
 
+
+def _expand_path(p: str) -> str:
+    """models.yaml `path` -> concrete path, with ~ and $VARS expanded.
+
+    Lets a LOCAL checkpoint be written as `${POST_CRISP_ROOT}/sft/merged/...` instead of one
+    machine's absolute path, so models.yaml stays committable — same rule as the module docstring
+    above: absolute paths are injected via runtime env, never hardcoded. HF repo ids
+    ("Qwen/Qwen3-VL-4B-Instruct") contain no $ or ~, so this is a no-op for them.
+
+    POST_CRISP_ROOT falls back to ROOT so an unset env behaves like the rest of the repo
+    (cwd) rather than leaving a literal "${POST_CRISP_ROOT}" in the path.
+    """
+    p = p.replace("${POST_CRISP_ROOT}", str(ROOT)) if "POST_CRISP_ROOT" not in os.environ else p
+    return os.path.expanduser(os.path.expandvars(p))
+
+
 # Raw/preprocessed data lives under benchmarks/data/<name>/ (anchored to the real
 # folder).
 # NOTE: kept under data/ to avoid a name clash with benchmarks/spatialscore.py (module).
@@ -85,8 +101,11 @@ class Model:
         known = {"tag", "path", "subfolder", "model_type", "backend", "enable_thinking",
                  "max_pixels", "min_pixels", "vllm_max_model_len", "vllm_tensor_parallel_size",
                  "vllm_engine_kwargs"}
+        kw = {k: d[k] for k in known if k in d}
+        if "path" in kw:
+            kw["path"] = _expand_path(kw["path"])
         return cls(
-            **{k: d[k] for k in known if k in d},
+            **kw,
             extra={k: v for k, v in d.items() if k not in known},
         )
 
