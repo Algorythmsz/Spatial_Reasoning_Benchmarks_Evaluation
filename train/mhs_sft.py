@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""train/train.py — SFT driver (in-process ms-swift) for the MultihopSpatial upper-bound.
+"""train/mhs_sft.py — SFT driver (in-process ms-swift) for the MultihopSpatial upper-bound.
 
 Fine-tunes a base VLM on the LEAKAGE-FREE MHS train split (train/prepare_mhs_sft.py output),
 in the exact output format the multihopspatial scorer parses, so the resulting checkpoint is
@@ -9,9 +9,9 @@ Supports LoRA and full FT (tuner_type). Mirrors infer.py's in-process swift usag
     here:      sft_main(SftArguments(**kwargs))      # ms-swift 4.4.1: swift.arguments/pipelines
 
 Usage (inference env; set POST_CRISP_ROOT / BENCH_DATA_DIR / HF_HOME):
-    python train/train.py --tuner-type lora
-    python train/train.py --tuner-type full          # 9B full FT -> DeepSpeed ZeRO-3 (+offload)
-    python train/train.py --tuner-type lora --dry-run   # print kwargs, don't train
+    python train/mhs_sft.py --tuner-type lora
+    python train/mhs_sft.py --tuner-type full        # full FT -> DeepSpeed ZeRO-3 (+offload)
+    python train/mhs_sft.py --tuner-type lora --dry-run   # print kwargs, don't train
 """
 from __future__ import annotations
 
@@ -23,10 +23,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_DATASET = "multihopspatial/mhs_sft_train.jsonl"     # relative to BENCH_DATA_DIR
 
-# SpatialScore test_qwen protocol pixel bounds — match inference so image-token counts stay
-# consistent between SFT and eval (infer.py sets the same via MIN/MAX_PIXELS env + max_pixels).
-MIN_PIXELS = 200704       # 256*28*28
-MAX_PIXELS = 2007040      # 2560*28*28
+# The authors' own training bounds, from their train/train_grpo.sh:
+#     --image_min_pixels $((256 * 32 * 32))   --image_max_pixels $((1280 * 32 * 32))
+# 32 = patch 16 x merge 2, so these are a floor of 256 and a ceiling of 1280 image tokens.
+# NOTE their evaluation script pins nothing (our INFER_DEFAULTS mirrors that with
+# pin_pixels=False), so training and eval see different resolutions upstream too — we follow
+# each side as published rather than making them agree.
+MIN_PIXELS = 256 * 32 * 32     # 262144  -> 256 image tokens
+MAX_PIXELS = 1280 * 32 * 32    # 1310720 -> 1280 image tokens
 
 
 def main() -> int:
@@ -38,13 +42,21 @@ def main() -> int:
                     help="SFT jsonl (default: <BENCH_DATA_DIR>/multihopspatial/mhs_sft_train.jsonl)")
     ap.add_argument("--output-dir", default=None,
                     help="ckpt dir (default: <POST_CRISP_ROOT>/sft/mhs-<base>-<tuner>)")
-    ap.add_argument("--epochs", type=float, default=2.0)
+    ap.add_argument("--epochs", type=float, default=10.0,   # authors' train_grpo.sh
+                    help="authors use 10; a 1-GPU run will not finish 10 in one 6h job")
     ap.add_argument("--max-length", type=int, default=4096)
-    ap.add_argument("--lr", type=float, default=None, help="default: 1e-4 (lora) / 1e-5 (full)")
+    ap.add_argument("--lr", type=float, default=None,
+                    help="default: 5e-5 (lora, the authors' value) / 1e-5 (full)")
     ap.add_argument("--batch-size", type=int, default=1)
-    ap.add_argument("--grad-accum", type=int, default=16)
+    # authors: global batch 128 across 8 GPUs. On one GPU the same global batch means
+    # accumulating all 128 — matched here, at the cost of 8x the wall-clock per step.
+    ap.add_argument("--grad-accum", type=int, default=128)
     ap.add_argument("--deepspeed", default=None,
                     help="zero2 | zero3 | zero3-offload (default: zero3-offload for full, none for lora)")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from the newest checkpoint in output_dir if one exists. The "
+                         "authors train 10 epochs; one 6h job on a single GPU does not get "
+                         "there, so the same job is re-submitted until it does.")
     ap.add_argument("--dry-run", action="store_true", help="print kwargs and exit (no training)")
     args = ap.parse_args()
 
@@ -57,7 +69,7 @@ def main() -> int:
     tag = args.base.rstrip("/").split("/")[-1].lower()
     output_dir = args.output_dir or os.path.join(root, "sft", f"mhs-{tag}-{args.tuner_type}")
 
-    lr = args.lr if args.lr is not None else (1e-4 if args.tuner_type == "lora" else 1e-5)
+    lr = args.lr if args.lr is not None else (5e-5 if args.tuner_type == "lora" else 1e-5)
     # 9B full FT on 2x48GB needs params+optimizer offloaded to CPU RAM (node has ~245G) -> zero3-offload.
     ds = args.deepspeed or ("zero3-offload" if args.tuner_type == "full" else None)
 
@@ -84,13 +96,27 @@ def main() -> int:
         use_hf=True,
         dataloader_num_workers=4,
         dataset_num_proc=4,
+        add_version=False,          # stable output_dir, so --resume can find the checkpoints
     )
     if args.tuner_type == "lora":
-        kwargs.update(lora_rank=16, lora_alpha=32)          # target_modules: swift default (all-linear); freeze_vit default True
+        # authors' LoRA shape (train_grpo.sh): r=64, alpha=64, dropout 0.05, adapters on the
+        # language model only. Their lora_namespan_exclude=['visual','lm_head','embed_tokens']
+        # is what swift gets from freeze_vit/freeze_aligner + all-linear targeting.
+        kwargs.update(lora_rank=64, lora_alpha=64, lora_dropout=0.05,
+                      freeze_vit=True, freeze_aligner=True)
     if args.model_type:
         kwargs["model_type"] = args.model_type
     if ds:
         kwargs["deepspeed"] = ds
+
+    if args.resume:
+        ckpts = sorted(Path(output_dir).glob("**/checkpoint-*"),
+                       key=lambda p: int(p.name.split("-")[-1]))
+        if ckpts:
+            kwargs["resume_from_checkpoint"] = str(ckpts[-1])
+            print(f"[train] resuming from {ckpts[-1]}")
+        else:
+            print(f"[train] --resume given but no checkpoint under {output_dir}; starting fresh")
 
     print(f"[train] MHS SFT | base={args.base} tuner={args.tuner_type} deepspeed={ds} epochs={args.epochs}")
     print(f"[train] dataset={dataset}")

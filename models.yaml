@@ -140,3 +140,40 @@ models:
     min_pixels: 200704
     max_pixels: 2007040
     vllm_max_model_len: 86016
+
+  # ── OUR MultihopSpatial SFT (train/mhs_sft.py, LoRA r=64 on the MHS train split) ──
+  # These reproduce the etri-vilab finetune above from the published recipe, so the pair
+  # (mhs-qwen3vl-4b vs mhs-qwen3vl-4b-sft) is the comparison that matters.
+  #
+  # `path` points at a MERGED checkpoint, not the LoRA adapter dir: swift export --merge_lora
+  # folds checkpoint-540 into the base weights, so these load exactly like every other entry
+  # here. Serving the adapter through vLLM instead would need enable_lora + max_lora_rank>=64
+  # (vLLM defaults to 16) and would put a different code path under these two models only —
+  # the merged form keeps them comparable to the rest of the table.
+  #   trained: 10 epochs, global batch 128, lr 5e-5, LoRA r=64/alpha=64/dropout 0.05,
+  #            vit+aligner frozen, image tokens pinned to 256..1280 (the authors' bounds).
+  # Rebuild with: swift export --adapters <sft>/mhs-<base>-lora/checkpoint-540 \
+  #            --merge_lora true --output_dir <path below> --use_hf true --torch_dtype bfloat16
+  #
+  # NOTE the pixel bounds below are the SpatialScore protocol values, NOT the training
+  # bounds (256*32*32 .. 1280*32*32). That is deliberate: multihopspatial declares
+  # pin_pixels=False, so for MHS eval these are ignored entirely and the model sees its own
+  # config default — matching upstream's evaluator, which pins nothing. They only take effect
+  # if these checkpoints are ever run on spatialscore/refspatial (both of which we did run).
+  - tag: mhs-qwen3vl-4b-sft
+    path: /data2/seungwon/post_crisp/sft/merged/mhs-qwen3-vl-4b-instruct-lora-merged
+    model_type: qwen3_vl          # ckpt config matches qwen3_vl / _emb / _reranker -> disambiguate
+    backend: vllm
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016
+
+  - tag: mhs-qwen3.5-4b-sft
+    path: /data2/seungwon/post_crisp/sft/merged/mhs-qwen3.5-4b-lora-merged
+    model_type: qwen3_5
+    backend: vllm
+    enable_thinking: false        # same as the qwen3.5-* base entries: SFT targets are a bare
+                                  # "Answer: ... / Bounding Box: ..." pair, no thinking trace
+    min_pixels: 200704
+    max_pixels: 2007040
+    vllm_max_model_len: 86016

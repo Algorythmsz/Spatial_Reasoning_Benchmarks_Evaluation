@@ -12,6 +12,16 @@
 ms-swift
 vllm                 # models.yaml sets backend: vllm  (infer.py -> swift infer --infer_backend vllm)
 qwen-vl-utils        # Qwen-VL image/video preprocessing
+flash-linear-attention  # REQUIRED to train Qwen3.5 (train/mhs_sft.py). ms-swift patches
+                     # Qwen3_5GatedDeltaNet.forward unconditionally, and its fallback to the
+                     # original forward only triggers when 'cu_seq_lens_q' is absent from
+                     # kwargs — transformers 5.x passes it, so the patched path always runs
+                     # and hard-requires fla's causal_conv1d + chunk_gated_delta_rule.
+                     # Without it: ImportError at step 0, even with padding_free=False and
+                     # sequence_parallel_size=1. Pure-Triton wheel, no nvcc needed.
+                     # NOTE transformers' own is_flash_linear_attention_available() also gates
+                     # on is_torch_cuda_available(), so it reads False on a GPU-less login node
+                     # even when correctly installed — verify inside a GPU allocation.
 datasets
 huggingface-hub
 PyYAML
